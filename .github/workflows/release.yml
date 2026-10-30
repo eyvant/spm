@@ -1,0 +1,140 @@
+name: Release
+
+"on":
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+      - name: Run tests
+        run: go test -race ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Run real systemd integration test
+        env:
+          SPM_CI_PREFIX: release-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          go build -buildvcs=false -o spm-ci ./cmd/spm
+          sudo install -m 0755 ./spm-ci /usr/local/bin/spm-ci
+          trap 'sudo rm -f /usr/local/bin/spm-ci' EXIT
+          sudo --preserve-env=SPM_CI_PREFIX bash scripts/ci-systemd-e2e.sh /usr/local/bin/spm-ci
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: test
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            goarch: amd64
+          - name: linux-arm64
+            goarch: arm64
+          - name: linux-armv7
+            goarch: arm
+            goarm: "7"
+          - name: linux-riscv64
+            goarch: riscv64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build archive
+        shell: bash
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm || '' }}
+          CGO_ENABLED: "0"
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          archive="spm-${GITHUB_REF_NAME}-${{ matrix.name }}.tar.gz"
+          mkdir -p build
+          go build -buildvcs=false -trimpath \
+            -ldflags="-s -w -X github.com/eyvant/spm/internal/app.version=${version}" \
+            -o build/spm ./cmd/spm
+          cp LICENSE build/LICENSE
+          tar -C build -czf "$archive" spm LICENSE
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: spm-${{ matrix.name }}
+          path: spm-*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Download archives
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cp install.sh dist/install.sh
+          cp LICENSE dist/LICENSE
+          chmod 0755 dist/install.sh
+          cd dist
+          sha256sum spm-*.tar.gz install.sh LICENSE > checksums.txt
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              dist/* \
+              --verify-tag \
+              --generate-notes \
+              --title "$GITHUB_REF_NAME"
+          fi

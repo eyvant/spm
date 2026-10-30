@@ -1,0 +1,113 @@
+name: spm Linux
+
+"on":
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Go and systemd integration (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - ubuntu-24.04
+          - ubuntu-26.04
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+
+      - name: Run tests with race detector
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Show coverage
+        run: go tool cover -func=coverage.out
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Build spm
+        run: go build -buildvcs=false -o spm ./cmd/spm
+
+      - name: Run real systemd integration test
+        env:
+          SPM_CI_PREFIX: ci-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          sudo install -m 0755 ./spm /usr/local/bin/spm-ci
+          trap 'sudo rm -f /usr/local/bin/spm-ci' EXIT
+          sudo --preserve-env=SPM_CI_PREFIX bash scripts/ci-systemd-e2e.sh /usr/local/bin/spm-ci
+
+  compatibility:
+    name: Unit compatibility (${{ matrix.distro }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: Debian 13
+            image: debian:13
+          - distro: Fedora
+            image: fedora:latest
+          - distro: openSUSE Leap
+            image: opensuse/leap:latest
+          - distro: Arch Linux
+            image: archlinux:base
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.image }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: /bin/sh -e {0}
+
+    steps:
+      - name: Install systemd tools
+        working-directory: /
+        run: |
+          case "${{ matrix.distro }}" in
+            "Debian 13")
+              apt-get update
+              apt-get install -y --no-install-recommends ca-certificates git systemd
+              ;;
+            "Fedora")
+              dnf install -y ca-certificates git gzip systemd tar
+              ;;
+            "openSUSE Leap")
+              zypper --non-interactive install ca-certificates git gzip tar
+              zypper --non-interactive install --force systemd
+              test -x /usr/bin/systemd-analyze
+              ;;
+            "Arch Linux")
+              pacman -Syu --noconfirm ca-certificates git systemd
+              ;;
+          esac
+
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run tests and verify generated units
+        run: |
+          export PATH="/usr/bin:/bin:$PATH"
+          /usr/bin/systemd-analyze --version
+          go test ./...
+
+      - name: Build spm
+        run: go build -buildvcs=false -o spm ./cmd/spm
