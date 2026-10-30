@@ -14,7 +14,16 @@ Install the latest release for your Linux architecture:
 curl -fsSL https://raw.githubusercontent.com/eyvant/spm/main/install.sh | sh
 ```
 
-The installer verifies the release checksum and installs `spm` to `~/.local/bin`. Make sure that directory is in `PATH`.
+The installer verifies the release checksum, installs `spm` to `~/.local/bin`, and installs completion for the shell named by `$SHELL` when it is Bash, Zsh, or Fish. Make sure `~/.local/bin` is in `PATH`.
+
+Choose a completion shell explicitly, or skip completion installation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eyvant/spm/main/install.sh | sh -s -- --completion bash
+curl -fsSL https://raw.githubusercontent.com/eyvant/spm/main/install.sh | sh -s -- --no-completion
+```
+
+The `SPM_COMPLETION` environment variable also accepts `auto`, `bash`, `zsh`, `fish`, or `none`.
 
 Install a specific version:
 
@@ -515,7 +524,7 @@ Bash:
 
 ```bash
 mkdir -p ~/.local/share/bash-completion/completions
-spm completion bash > ~/.local/share/bash-completion/completions/spm
+spm completion bash > ~/.local/share/bash-completion/completions/spm.bash
 ```
 
 Zsh:

@@ -5,6 +5,7 @@ set -eu
 repository="eyvant/spm"
 requested_version="latest"
 install_dir="${SPM_INSTALL_DIR:-${HOME}/.local/bin}"
+completion_shell="${SPM_COMPLETION:-auto}"
 
 usage() {
   cat <<'EOF'
@@ -12,14 +13,18 @@ Install spm from a GitHub Release.
 
 Usage:
   install.sh [--version VERSION] [--install-dir DIRECTORY]
+             [--completion auto|bash|zsh|fish|none]
 
 Options:
   --version VERSION       Install a release such as v0.1.0 or 0.1.0.
   --install-dir DIRECTORY Install to DIRECTORY instead of ~/.local/bin.
+  --completion SHELL      Install completion for SHELL (default: auto).
+  --no-completion         Do not install shell completion.
   -h, --help              Show this help.
 
 Environment:
   SPM_INSTALL_DIR         Default installation directory.
+  SPM_COMPLETION          Default completion mode: auto, bash, zsh, fish, or none.
 EOF
 }
 
@@ -40,6 +45,15 @@ while [ "$#" -gt 0 ]; do
       install_dir=$2
       shift 2
       ;;
+    --completion)
+      [ "$#" -ge 2 ] || fail "--completion requires a value"
+      completion_shell=$2
+      shift 2
+      ;;
+    --no-completion)
+      completion_shell="none"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -49,6 +63,11 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+case "$completion_shell" in
+  auto|bash|zsh|fish|none) ;;
+  *) fail "unsupported completion shell: $completion_shell; use auto, bash, zsh, fish, or none" ;;
+esac
 
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v tar >/dev/null 2>&1 || fail "tar is required"
@@ -123,6 +142,46 @@ install -m 0755 "${temporary_dir}/spm" "${install_dir}/spm"
 
 printf 'Installed spm %s to %s/spm\n' "$version" "$install_dir"
 "${install_dir}/spm" version
+
+if [ "$completion_shell" = "auto" ]; then
+  detected_shell=${SHELL:-}
+  detected_shell=${detected_shell##*/}
+  case "$detected_shell" in
+    bash|zsh|fish) completion_shell=$detected_shell ;;
+    *)
+      completion_shell="none"
+      printf 'Shell completion was not installed because $SHELL is not bash, zsh, or fish.\n'
+      printf 'Run the installer again with --completion bash|zsh|fish to install it explicitly.\n'
+      ;;
+  esac
+fi
+
+case "$completion_shell" in
+  bash)
+    completion_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/bash-completion/completions"
+    completion_path="${completion_dir}/spm.bash"
+    ;;
+  zsh)
+    completion_dir="${HOME}/.zfunc"
+    completion_path="${completion_dir}/_spm"
+    ;;
+  fish)
+    completion_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/fish/completions"
+    completion_path="${completion_dir}/spm.fish"
+    ;;
+esac
+
+if [ "$completion_shell" != "none" ]; then
+  completion_file="${temporary_dir}/spm-completion"
+  "${install_dir}/spm" completion "$completion_shell" > "$completion_file"
+  mkdir -p "$completion_dir"
+  install -m 0644 "$completion_file" "$completion_path"
+  printf 'Installed %s completion to %s\n' "$completion_shell" "$completion_path"
+
+  if [ "$completion_shell" = "zsh" ]; then
+    printf 'Ensure %s is in fpath, then run: autoload -Uz compinit && compinit\n' "$completion_dir"
+  fi
+fi
 
 case ":${PATH}:" in
   *":${install_dir}:"*) ;;
