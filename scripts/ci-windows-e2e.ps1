@@ -198,3 +198,8 @@ $accountLine
     if ($system) { Remove-Item -LiteralPath $workloadDir -Recurse -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $data -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+# GitHub's pwsh wrapper exits with the last native command's exit code.
+# Best-effort cleanup can leave a nonzero code for an already-deleted service.
+# Only successful completion reaches here; exceptions still fail the step.
+$global:LASTEXITCODE = 0
