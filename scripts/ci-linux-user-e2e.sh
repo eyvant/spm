@@ -52,7 +52,10 @@ systemctl --user is-active --quiet "spm-$MAIN.service"
 systemctl --user is-active --quiet "spm-$DEPENDENCY.service"
 systemctl --user is-active --quiet "spm-$DEPENDENT.service"
 
-"$SPM" start --name "$CRASHING" --no-enable --restart on-failure --restart-sec 100ms -- /bin/sh -c 'sleep 0.2; exit 23'
+if ! "$SPM" start --name "$CRASHING" --no-enable --restart on-failure --restart-sec 100ms -- /bin/sh -c 'sleep 0.2; exit 23'; then
+  echo "spm start observed the intentional crash; checking native restart state" >&2
+fi
+test "$(systemctl --user show "spm-$CRASHING.service" --property=Restart --value)" = on-failure
 for _ in {1..40}; do
   RESTARTS=$(systemctl --user show "spm-$CRASHING.service" -p NRestarts --value)
   [[ ${RESTARTS:-0} -ge 2 ]] && break

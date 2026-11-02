@@ -1137,13 +1137,18 @@ func windowsBuiltInAccount(value string) bool {
 
 func (b *windowsBackend) secureSystemData(name, runAs string) error {
 	rootGrants := windowsSystemRootACLGrants()
-	rootArgs := []string{b.root, "/inheritance:r", "/grant:r"}
-	rootArgs = append(rootArgs, rootGrants...)
-	rootArgs = append(rootArgs, "/Q")
-	rootCommand := exec.Command("icacls.exe", rootArgs...)
-	rootCommand.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if output, err := rootCommand.CombinedOutput(); err != nil {
-		return fmt.Errorf("secure system service root: %s: %w", strings.TrimSpace(string(output)), err)
+	// Secure the existing services container before its parent. ACL changes do
+	// not propagate to existing children, and every service account must be able
+	// to traverse both containers before reaching its isolated directory.
+	for _, directory := range []string{b.servicesDir(), b.root} {
+		rootArgs := []string{directory, "/inheritance:r", "/grant:r"}
+		rootArgs = append(rootArgs, rootGrants...)
+		rootArgs = append(rootArgs, "/Q")
+		rootCommand := exec.Command("icacls.exe", rootArgs...)
+		rootCommand.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		if output, err := rootCommand.CombinedOutput(); err != nil {
+			return fmt.Errorf("secure system service container %s: %s: %w", directory, strings.TrimSpace(string(output)), err)
+		}
 	}
 	resetCommand := exec.Command("icacls.exe", b.serviceDir(name), "/reset", "/T", "/C", "/Q")
 	resetCommand.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}

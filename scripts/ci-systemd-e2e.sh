@@ -104,10 +104,14 @@ test ! -e /etc/systemd/system/spm-$SERVICE.cron-restart.timer
 systemctl start spm-$SERVICE.health.service
 "$SPM" --system show "$SERVICE" | grep -F healthy
 
-# Keep the first process alive long enough for `systemctl start` to observe the
-# active state. Newer systemd releases otherwise report the intentional early
-# failure from the start command itself before Restart= can be exercised.
-"$SPM" --system start --name "$CRASHING" --cwd /tmp --restart on-failure --restart-sec 200ms --no-enable -- /bin/sh -c 'sleep 0.2; exit 23'
+# systemd versions differ on whether `systemctl start` returns success after
+# observing an initially-active service that then fails during the same start
+# transaction. The unit and its restart counter are the assertions here, so an
+# exit caused by the intentional crash is acceptable.
+if ! "$SPM" --system start --name "$CRASHING" --cwd /tmp --restart on-failure --restart-sec 200ms --no-enable -- /bin/sh -c 'sleep 0.2; exit 23'; then
+  echo "spm start observed the intentional crash; checking native restart state" >&2
+fi
+test "$(systemctl show "spm-$CRASHING.service" --property=Restart --value)" = on-failure
 for _ in $(seq 1 40); do
   RESTARTS=$(systemctl show "spm-$CRASHING.service" --property=NRestarts --value)
   [[ ${RESTARTS:-0} -ge 2 ]] && break
