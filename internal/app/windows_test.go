@@ -3,7 +3,8 @@
 package app
 
 import (
-	"os/exec"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -24,6 +25,7 @@ func TestWindowsRunAsScopesAndAliases(t *testing.T) {
 		{value: `NT AUTHORITY\NETWORK SERVICE`, system: true, want: `NT AUTHORITY\NETWORKSERVICE`},
 		{value: `DOMAIN\svc-spm`, system: true, want: `DOMAIN\svc-spm`},
 		{value: `DOMAIN\gmsa$`, system: true, want: `DOMAIN\gmsa$`},
+		{value: `NT SERVICE\spm-api`, system: true, want: `NT SERVICE\spm-api`},
 	}
 	for _, test := range tests {
 		got, err := windowsRunAs(test.value, test.system)
@@ -55,25 +57,35 @@ func TestWindowsRejectsPlatformSpecificStartOptions(t *testing.T) {
 	}
 }
 
-func TestWindowsTaskNamesSeparateScopes(t *testing.T) {
-	t.Setenv("USERNAME", "alice")
-	user := (&windowsBackend{}).taskName("api")
-	system := (&windowsBackend{system: true}).taskName("api")
-	if user != "spm-user-alice-api" || system != "spm-system-api" {
-		t.Fatalf("task names = %q, %q", user, system)
+func TestWindowsSCMServiceName(t *testing.T) {
+	backend := &windowsBackend{system: true}
+	if got := backend.scmName("api"); got != "spm-api" {
+		t.Fatalf("SCM service name = %q, want spm-api", got)
 	}
 }
 
-func TestWindowsStartupTaskHasNoExecutionDeadline(t *testing.T) {
-	if !strings.Contains(windowsRegisterTaskScript, "[TimeSpan]::Zero") || !strings.Contains(windowsRegisterTaskScript, "MultipleInstances IgnoreNew") {
-		t.Fatalf("startup task settings are not suitable for a persistent supervisor")
+func TestWindowsVirtualServiceAccount(t *testing.T) {
+	if !windowsVirtualServiceAccount(`NT SERVICE\spm-api`) || windowsVirtualServiceAccount(`DOMAIN\svc-api`) {
+		t.Fatal("virtual service account detection is incorrect")
 	}
 }
 
-func TestWindowsStartupTaskPowerShellParses(t *testing.T) {
-	command := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-Command", `[ScriptBlock]::Create([Console]::In.ReadToEnd()) | Out-Null`)
-	command.Stdin = strings.NewReader(windowsRegisterTaskScript)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("PowerShell startup task script does not parse: %v\n%s", err, output)
+func TestWindowsPreparesPowerShellScriptAutomatically(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.ps1")
+	if err := os.WriteFile(path, []byte("Write-Output ready\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options, err := parseStart([]string{"--name", "worker", path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := options.prepare(); err != nil {
+		t.Fatal(err)
+	}
+	command := strings.Join(options.command, " ")
+	for _, want := range []string{"powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path} {
+		if !strings.Contains(strings.ToLower(command), strings.ToLower(want)) {
+			t.Fatalf("PowerShell command %q does not contain %q", command, want)
+		}
 	}
 }

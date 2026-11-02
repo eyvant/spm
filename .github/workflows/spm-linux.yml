@@ -19,7 +19,7 @@ jobs:
           - ubuntu-24.04
           - ubuntu-26.04
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -28,7 +28,9 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache-dependency-path: go.mod
+          cache-dependency-path: |
+            go.mod
+            go.sum
 
       - name: Run tests with race detector
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
@@ -49,6 +51,17 @@ jobs:
           sudo install -m 0755 ./spm /usr/local/bin/spm-ci
           trap 'sudo rm -f /usr/local/bin/spm-ci' EXIT
           sudo --preserve-env=SPM_CI_PREFIX bash scripts/ci-systemd-e2e.sh /usr/local/bin/spm-ci
+
+      - name: Run real user-systemd integration test
+        env:
+          SPM_CI_PREFIX: ci-user-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          uid=$(id -u)
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$uid.service"
+          export XDG_RUNTIME_DIR="/run/user/$uid"
+          systemctl --user daemon-reload
+          bash scripts/ci-linux-user-e2e.sh ./spm
 
   compatibility:
     name: Unit compatibility (${{ matrix.distro }})

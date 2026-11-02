@@ -14,7 +14,12 @@ SPM=$(realpath "$1")
 PREFIX=${SPM_CI_PREFIX:-ci-$$}
 SERVICE=${PREFIX}-service
 SCHEDULE=${PREFIX}-schedule
+DEPENDENCY=${PREFIX}-dependency
+DEPENDENT=${PREFIX}-dependent
+DECLARED=${PREFIX}-declared
+CRASHING=${PREFIX}-crashing
 MARKER=/tmp/${PREFIX}-schedule-ran
+TOML=/tmp/${PREFIX}.toml
 
 diagnose() {
   local exit_code=$1
@@ -30,7 +35,11 @@ diagnose() {
     "spm-$SERVICE.health.timer" \
     "spm-$SERVICE.cron-restart.timer" \
     "spm-$SCHEDULE.service" \
-    "spm-$SCHEDULE.timer" >&2
+    "spm-$SCHEDULE.timer" \
+    "spm-$DEPENDENCY.service" \
+    "spm-$DEPENDENT.service" \
+    "spm-$DECLARED.service" \
+    "spm-$CRASHING.service" >&2
   journalctl --no-pager -n 100 \
     -u "spm-$SERVICE.service" \
     -u "spm-$SERVICE.health.service" \
@@ -43,7 +52,11 @@ cleanup() (
   set +e
   "$SPM" --system delete "$SERVICE" >/dev/null 2>&1
   "$SPM" --system delete "$SCHEDULE" >/dev/null 2>&1
-  rm -f "$MARKER"
+  "$SPM" --system delete "$DEPENDENT" >/dev/null 2>&1
+  "$SPM" --system delete "$DEPENDENCY" >/dev/null 2>&1
+  "$SPM" --system delete "$DECLARED" >/dev/null 2>&1
+  "$SPM" --system delete "$CRASHING" >/dev/null 2>&1
+  rm -f "$MARKER" "$TOML"
 )
 trap 'diagnose "$?" "$LINENO" "$BASH_COMMAND"' ERR
 trap cleanup EXIT
@@ -89,6 +102,15 @@ test ! -e /etc/systemd/system/spm-$SERVICE.cron-restart.timer
 systemctl start spm-$SERVICE.health.service
 "$SPM" --system show "$SERVICE" | grep -F healthy
 
+"$SPM" --system start --name "$CRASHING" --cwd /tmp --restart on-failure --restart-sec 200ms --no-enable -- /bin/sh -c 'exit 23'
+for _ in $(seq 1 40); do
+  RESTARTS=$(systemctl show "spm-$CRASHING.service" --property=NRestarts --value)
+  [[ ${RESTARTS:-0} -ge 2 ]] && break
+  sleep 0.25
+done
+[[ ${RESTARTS:-0} -ge 2 ]]
+"$SPM" --system stop "$CRASHING"
+
 PID_BEFORE=$(systemctl show spm-$SERVICE.service --property=MainPID --value)
 "$SPM" --system restart "$SERVICE"
 PID_AFTER=$(systemctl show spm-$SERVICE.service --property=MainPID --value)
@@ -103,6 +125,39 @@ test "$PID_AFTER" != 0
   --run-now \
   -- /usr/bin/touch "$MARKER"
 test -e "$MARKER"
+
+"$SPM" --system start --name "$DEPENDENCY" --cwd /tmp --restart no --no-enable -- /bin/sleep 300
+"$SPM" --system stop "$DEPENDENCY"
+"$SPM" --system start --name "$DEPENDENT" --cwd /tmp --restart no --no-enable \
+  --requires "spm-$DEPENDENCY.service" --after "spm-$DEPENDENCY.service" -- /bin/sleep 300
+systemctl is-active --quiet "spm-$DEPENDENCY.service"
+systemctl is-active --quiet "spm-$DEPENDENT.service"
+systemctl stop "spm-$DEPENDENT.service" "spm-$DEPENDENCY.service"
+systemctl start "spm-$DEPENDENT.service"
+systemctl is-active --quiet "spm-$DEPENDENCY.service"
+systemctl is-active --quiet "spm-$DEPENDENT.service"
+
+cat >"$TOML" <<EOF
+schema = 1
+[[services]]
+name = "$DECLARED"
+command = ["/bin/sleep", "300"]
+restart = "no"
+enable = false
+[services.linux]
+user = "nobody"
+group = "nogroup"
+description = "Linux declaration integration"
+[services.windows]
+command = ["cmd.exe", "/c", "exit", "0"]
+[services.macos]
+command = ["/bin/sleep", "300"]
+EOF
+"$SPM" --system validate "$TOML"
+"$SPM" --system apply --dry-run "$TOML" | grep -F $'create\t'"$DECLARED"
+"$SPM" --system apply "$TOML"
+systemctl is-active --quiet "spm-$DECLARED.service"
+"$SPM" --system diff "$TOML" | grep -F $'unchanged\t'"$DECLARED"
 test "$(systemctl is-active spm-$SCHEDULE.timer)" = active
 test "$(systemctl is-enabled spm-$SCHEDULE.timer)" = enabled
 
@@ -113,6 +168,10 @@ test -e "$MARKER"
 cleanup
 test ! -e /etc/systemd/system/spm-$SERVICE.service
 test ! -e /etc/systemd/system/spm-$SCHEDULE.service
+test ! -e /etc/systemd/system/spm-$DEPENDENCY.service
+test ! -e /etc/systemd/system/spm-$DEPENDENT.service
+test ! -e /etc/systemd/system/spm-$DECLARED.service
+test ! -e /etc/systemd/system/spm-$CRASHING.service
 test ! -e /etc/spm/services/$SERVICE.json
 test ! -e /etc/spm/services/$SCHEDULE.json
 

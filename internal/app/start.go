@@ -1426,6 +1426,7 @@ func (o *startOptions) prepareScriptCommand() error {
 				if err != nil {
 					return err
 				}
+				toolArgs = scriptRuntimeOptions(target)
 			}
 		}
 		command := append([]string{mise, "exec", "--", tool}, toolArgs...)
@@ -1460,7 +1461,9 @@ func (o *startOptions) prepareScriptCommand() error {
 		if resolveErr != nil {
 			return fmt.Errorf("resolve %s for %s: %w", runtimeName, target, resolveErr)
 		}
-		o.command = append([]string{interpreter, target}, arguments...)
+		command := append([]string{interpreter}, scriptRuntimeOptions(target)...)
+		command = append(command, target)
+		o.command = append(command, arguments...)
 		return nil
 	}
 	executable, err := resolveExecutableFromPath(target, o.cwd, o.executablePath)
@@ -1587,9 +1590,25 @@ func scriptRuntime(path string) (string, error) {
 		return "ruby", nil
 	case ".sh":
 		return "sh", nil
+	case ".ps1":
+		if runtime.GOOS == "windows" {
+			return "powershell.exe", nil
+		}
+		return "pwsh", nil
 	default:
 		return "", fmt.Errorf("cannot infer runtime for %q; use --interpreter or an explicit command after --", path)
 	}
+}
+
+func scriptRuntimeOptions(path string) []string {
+	if !strings.EqualFold(filepath.Ext(path), ".ps1") {
+		return nil
+	}
+	options := []string{"-NoLogo", "-NoProfile", "-NonInteractive"}
+	if runtime.GOOS == "windows" {
+		options = append(options, "-ExecutionPolicy", "Bypass")
+	}
+	return append(options, "-File")
 }
 
 func resolveExecutable(name string) (string, error) {

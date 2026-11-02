@@ -2,7 +2,6 @@ name: macOS
 
 "on":
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -13,6 +12,7 @@ jobs:
   test:
     name: macOS ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -26,7 +26,9 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache-dependency-path: go.mod
+          cache-dependency-path: |
+            go.mod
+            go.sum
 
       - name: Test
         run: go test -race ./...
@@ -37,43 +39,16 @@ jobs:
       - name: Build
         run: go build -buildvcs=false -o spm-ci ./cmd/spm
 
-      - name: Validate cross-platform declaration
+      - name: Exercise LaunchAgent services
         shell: bash
+        env:
+          SPM_CI_PREFIX: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
         run: |
-          cat > spm-ci.toml <<'EOF'
-          schema = 1
-          [[services]]
-          name = "ci-declaration"
-          command = ["/usr/bin/true"]
-          [services.linux]
-          user = "nobody"
-          [services.windows]
-          command = ["cmd.exe", "/c", "exit", "0"]
-          [services.macos]
-          command = ["/usr/bin/true"]
-          EOF
-          ./spm-ci validate spm-ci.toml
+          bash scripts/ci-macos-e2e.sh ./spm-ci user
 
-      - name: Exercise LaunchAgent lifecycle
+      - name: Exercise LaunchDaemon services
         shell: bash
+        env:
+          SPM_CI_PREFIX: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
         run: |
-          name="spm-ci-user-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          cleanup() { ./spm-ci delete --yes "$name" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-          ./spm-ci start --name "$name" --no-enable -- /bin/sleep 60
-          ./spm-ci list --json | grep -F "\"$name\""
-          ./spm-ci status "$name"
-          ./spm-ci stop "$name"
-          ./spm-ci delete --yes "$name"
-
-      - name: Exercise LaunchDaemon lifecycle
-        shell: bash
-        run: |
-          name="spm-ci-system-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          cleanup() { sudo ./spm-ci --system delete --yes "$name" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-          sudo ./spm-ci --system start --name "$name" --no-enable -- /bin/sleep 60
-          sudo ./spm-ci --system list --json | grep -F "\"$name\""
-          sudo ./spm-ci --system status "$name"
-          sudo ./spm-ci --system stop "$name"
-          sudo ./spm-ci --system delete --yes "$name"
+          bash scripts/ci-macos-e2e.sh ./spm-ci system

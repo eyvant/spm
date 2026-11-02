@@ -2,7 +2,7 @@
 
 Run applications as persistent services on Linux, Windows, and macOS without writing service definitions.
 
-`spm` provides one PM2-like command line across three native service managers. Linux uses systemd and journald, Windows uses a per-service supervisor plus Startup or Task Scheduler, and macOS uses launchd LaunchAgents or LaunchDaemons.
+`spm` provides one PM2-like command line across three native service managers. Linux uses systemd and journald, Windows uses per-user supervisors plus Startup and native SCM services for system scope, and macOS uses launchd LaunchAgents or LaunchDaemons.
 
 > User services do not require elevation. Use `--system` explicitly when a service must run at the machine level.
 
@@ -108,13 +108,16 @@ spm --system start --user LocalService --name api -- .\api.exe
 spm --system start --user NetworkService --name proxy -- .\proxy.exe
 spm --system start --user 'DOMAIN\svc-api' --name api -- .\api.exe
 spm --system start --user 'DOMAIN\svc-api$' --name api -- .\api.exe
+spm --system start --user 'NT SERVICE\spm-api' --name api -- .\api.exe
 ```
 
 Aliases for `SYSTEM`, `LocalSystem`, `LocalService`, and `NetworkService` are
-accepted, as are group Managed Service Accounts (gMSA, ending in `$`). For a
-regular local or domain user, Task Scheduler prompts for the password and
-stores the credential; spm never writes it to its configuration. spm
-restricts `%ProgramData%\spm` ACLs to Administrators, SYSTEM, and the selected
+accepted, as are group Managed Service Accounts (gMSA, ending in `$`) and
+`NT SERVICE\...` virtual accounts. For a regular local or domain user, spm
+grants `SeServiceLogonRight`, prompts securely, and passes the credential
+directly to SCM; spm never writes it to its configuration. System services are
+visible in `services.msc`. spm restricts `%ProgramData%\spm` ACLs to
+Administrators, SYSTEM, and the selected
 service account. `--group` is Unix-specific and rejected on Windows.
 
 Check it:
@@ -162,10 +165,13 @@ spm start --name api -- node app.js --port 3000
 spm start worker.py --name worker
 spm start server.rb --name web
 spm start cleanup.sh --name cleanup
+spm start worker.ps1 --name windows-worker
 spm start worker.ts --name typescript-worker --interpreter bun
 ```
 
-spm recognizes `.js`, `.mjs`, `.cjs`, `.py`, `.rb`, and `.sh`. Use `--interpreter` for anything else.
+spm recognizes `.js`, `.mjs`, `.cjs`, `.py`, `.rb`, `.sh`, and `.ps1`.
+PowerShell scripts use Windows PowerShell on Windows and `pwsh` on Linux or
+macOS. Use `--interpreter` to override the default or handle another type.
 
 ### Native commands and application arguments
 
@@ -680,9 +686,12 @@ go build \
 ```
 
 GitHub Actions runs tests, vet, builds, and real lifecycle integration tests on
-Ubuntu, Windows Server, and macOS runners. Linux exercises systemd, Windows
-exercises user and system services, and macOS exercises LaunchAgents and
-LaunchDaemons. Releases include Linux, Windows, and macOS archives.
+Ubuntu, Windows Server, and macOS runners. Every platform exercises user and
+system scopes, lifecycle operations, logs, restart behavior, dependencies, and
+declarative validate/apply/diff. Linux additionally verifies native systemd
+units and timers, Windows verifies Startup shortcuts, SCM dependencies and
+service accounts, and macOS verifies LaunchAgents and LaunchDaemons. Releases
+include Linux, Windows, and macOS archives.
 
 ## License
 
@@ -691,7 +700,7 @@ spm is available under the [MIT License](LICENSE).
 ## Current limitations
 
 - Linux requires systemd. Windows 10/11 and Windows Server use the per-user
-  Startup folder and Task Scheduler. macOS uses launchd.
+  Startup folder and the Service Control Manager. macOS uses launchd.
 - Windows currently supports the core lifecycle, logs, restart policies,
   readiness checks, user/system scopes, and selectable system accounts.
   Scheduling, health timers, instances, resource limits, and systemd unit

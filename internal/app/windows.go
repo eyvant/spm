@@ -21,9 +21,9 @@ import (
 )
 
 // The Windows backend deliberately uses only operating-system facilities. A
-// small detached spm supervisor owns each child process. The current user's
-// Startup folder handles user logon, while Task Scheduler handles machine boot.
-// This mirrors systemd scopes without installing a global daemon.
+// small detached spm supervisor owns each user process. The current user's
+// Startup folder handles user logon, while machine-wide services use the
+// Windows Service Control Manager and are visible in services.msc.
 
 const windowsStateVersion = 1
 
@@ -70,6 +70,13 @@ type windowsBackend struct {
 }
 
 func runWindows(args []string, stdout, stderr io.Writer, system bool) error {
+	if len(args) > 0 && args[0] == "__windows-service" {
+		if len(args) != 4 || args[1] != "--root" || !filepath.IsAbs(args[2]) {
+			return errors.New("invalid Windows service invocation")
+		}
+		b := &windowsBackend{stdout: stdout, stderr: stderr, root: filepath.Clean(args[2]), system: true}
+		return runWindowsSCMService(b, args[3])
+	}
 	if len(args) > 0 && args[0] == "__windows-supervise" {
 		if len(args) != 4 || args[1] != "--root" || !filepath.IsAbs(args[2]) {
 			return errors.New("invalid Windows supervisor invocation")
@@ -83,6 +90,9 @@ func runWindows(args []string, stdout, stderr io.Writer, system bool) error {
 		}
 		b := &windowsBackend{stdout: io.Discard, stderr: io.Discard, root: filepath.Clean(args[2])}
 		return b.startManaged(args[3])
+	}
+	if system && !windowsIsElevated() {
+		return errors.New("system mode requires an Administrator PowerShell terminal")
 	}
 	b, err := newWindowsBackend(stdout, stderr, system)
 	if err != nil {
@@ -146,8 +156,8 @@ Core commands:
   spm completion powershell
 
 Global options:
-  --system                    Use machine-wide services in %ProgramData%\spm.
-                              Requires an Administrator terminal and starts at boot.
+  --system                    Use Windows services in %ProgramData%\spm.
+                              Requires Administrator and appears in services.msc.
 
 Start options supported on Windows:
   -n, --name NAME             Service name
@@ -171,8 +181,8 @@ Start options supported on Windows:
 
 Scopes:
   User services run as the current account and start at that user's logon.
-  System services run at boot, default to LocalSystem, and may select another
-  Windows account with --user. Passwords are handled by Task Scheduler.
+  System services use SCM, run at boot, default to LocalSystem, and may select
+  another Windows account with --user.
 `)
 	return true
 }
@@ -268,7 +278,7 @@ func (b *windowsBackend) run(args []string) error {
 			return errors.New("startup does not accept arguments")
 		}
 		if b.system {
-			fmt.Fprintln(b.stdout, "Enabled Windows system services start automatically at boot through Task Scheduler.")
+			fmt.Fprintln(b.stdout, "Enabled Windows system services start automatically at boot through the Service Control Manager.")
 		} else {
 			fmt.Fprintln(b.stdout, "Enabled Windows user services start automatically at logon through the user's Startup folder.")
 		}
@@ -296,13 +306,7 @@ func (b *windowsBackend) native(args []string) error {
 		fmt.Fprintf(b.stdout, "Configuration: %s\n", b.configPath(name))
 		return nil
 	}
-	cmd := exec.Command("schtasks.exe", "/Query", "/TN", b.taskName(name), "/V", "/FO", "LIST")
-	cmd.Stdout, cmd.Stderr = b.stdout, b.stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("inspect Windows scheduled task: %w", err)
-	}
-	return nil
+	return b.inspectSCMService(name, b.stdout, b.stderr)
 }
 
 func (b *windowsBackend) ensureDirectories() error {
@@ -468,12 +472,16 @@ func (b *windowsBackend) start(args []string) error {
 		return fmt.Errorf("write Windows service config: %w", err)
 	}
 	if b.system {
-		if err := b.secureSystemData(config.Name, config.RunAs); err != nil {
+		if err := b.register(config.Name); err != nil {
 			_ = os.RemoveAll(b.serviceDir(config.Name))
 			return err
 		}
-	}
-	if config.Enabled {
+		if err := b.secureSystemData(config.Name, config.RunAs); err != nil {
+			_ = b.unregister(config.Name)
+			_ = os.RemoveAll(b.serviceDir(config.Name))
+			return err
+		}
+	} else if config.Enabled {
 		if err := b.register(config.Name); err != nil {
 			_ = os.RemoveAll(b.serviceDir(config.Name))
 			return err
@@ -679,10 +687,16 @@ func (b *windowsBackend) startManagedStack(name string, stack map[string]bool) e
 	}
 	state := b.readState(name)
 	if state.SupervisorPID > 0 && windowsProcessAlive(state.SupervisorPID) {
-		if state.PID > 0 {
-			return nil
+		if b.system && !b.scmInstalled(name) {
+			if err := b.stopLegacySystemTask(name); err != nil {
+				return err
+			}
+		} else {
+			if state.PID > 0 {
+				return nil
+			}
+			return fmt.Errorf("service %q supervisor is already starting", name)
 		}
-		return fmt.Errorf("service %q supervisor is already starting", name)
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -714,32 +728,15 @@ func (b *windowsBackend) startManagedStack(name string, stack map[string]bool) e
 }
 
 func (b *windowsBackend) startSystemManaged(name string) error {
-	config, err := b.readConfig(name)
-	if err != nil {
-		return err
-	}
-	if !config.Enabled {
-		if err := b.register(name); err != nil {
+	if !b.scmInstalled(name) {
+		if err := b.removeLegacySystemTask(name); err != nil {
+			return err
+		}
+		if err := b.installSCMService(name); err != nil {
 			return err
 		}
 	}
-	cmd := exec.Command("schtasks.exe", "/Run", "/TN", b.taskName(name))
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if output, err := cmd.CombinedOutput(); err != nil {
-		if !config.Enabled {
-			_ = b.unregister(name)
-		}
-		return fmt.Errorf("start LocalSystem task: %s: %w", strings.TrimSpace(string(output)), err)
-	}
-	if err := b.waitSupervisor(name, 10*time.Second); err != nil {
-		return err
-	}
-	if !config.Enabled {
-		// A running task is not terminated when its registration is removed.
-		// This implements start-without-enable while keeping the next boot clean.
-		_ = b.unregister(name)
-	}
-	return nil
+	return b.startSCMService(name)
 }
 
 func (b *windowsBackend) waitSupervisor(name string, timeout time.Duration) error {
@@ -947,9 +944,7 @@ func (b *windowsBackend) sendControl(name, action string) error {
 		}
 		return b.startManaged(name)
 	}
-	control := windowsControl{Action: action, RequestedAt: time.Now().UnixNano()}
-	data, _ := json.Marshal(control)
-	if err := writeFileAtomic(b.controlPath(name), data, 0o600); err != nil {
+	if err := b.writeControl(name, action); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -969,7 +964,18 @@ func (b *windowsBackend) sendControl(name, action string) error {
 	return fmt.Errorf("timed out waiting for %s to %s", name, action)
 }
 
-func (b *windowsBackend) stop(name string) error { return b.sendControl(name, "stop") }
+func (b *windowsBackend) writeControl(name, action string) error {
+	control := windowsControl{Action: action, RequestedAt: time.Now().UnixNano()}
+	data, _ := json.Marshal(control)
+	return writeFileAtomic(b.controlPath(name), data, 0o600)
+}
+
+func (b *windowsBackend) stop(name string) error {
+	if b.system {
+		return b.stopSCMService(name)
+	}
+	return b.sendControl(name, "stop")
+}
 
 func (b *windowsBackend) controlMany(action string, selectors []string) error {
 	names, err := b.selectNames(selectors, false)
@@ -982,7 +988,14 @@ func (b *windowsBackend) controlMany(action string, selectors []string) error {
 		case "stop":
 			err = b.stop(name)
 		case "restart":
-			err = b.sendControl(name, "restart")
+			if b.system {
+				err = b.stopSCMService(name)
+				if err == nil {
+					err = b.startSystemManaged(name)
+				}
+			} else {
+				err = b.sendControl(name, "restart")
+			}
 		case "enable":
 			err = b.setEnabled(name, true)
 		case "disable":
@@ -1001,6 +1014,29 @@ func (b *windowsBackend) setEnabled(name string, enabled bool) error {
 	config, err := b.readConfig(name)
 	if err != nil {
 		return err
+	}
+	if b.system {
+		previous := config.Enabled
+		config.Enabled = enabled
+		if err := b.writeConfig(config); err != nil {
+			return err
+		}
+		if !b.scmInstalled(name) {
+			err = b.installSCMService(name)
+		} else {
+			err = b.configureSCMStartType(name, enabled)
+		}
+		if err == nil && enabled {
+			err = b.startSystemManaged(name)
+		} else if err == nil {
+			err = b.stopSCMService(name)
+		}
+		if err != nil {
+			config.Enabled = previous
+			_ = b.writeConfig(config)
+			return err
+		}
+		return nil
 	}
 	if enabled {
 		config.Enabled = true
@@ -1033,53 +1069,10 @@ func (b *windowsBackend) register(name string) error {
 		return err
 	}
 	if b.system {
-		stableExecutable := filepath.Join(b.serviceDir(name), "spm-supervisor.exe")
-		data, readErr := os.ReadFile(executable)
-		if readErr != nil {
-			return fmt.Errorf("read spm executable for system service: %w", readErr)
-		}
-		if writeErr := writeFileAtomic(stableExecutable, data, 0o700); writeErr != nil {
-			return fmt.Errorf("install system supervisor executable: %w", writeErr)
-		}
-		executable = stableExecutable
+		return b.installSCMService(name)
 	} else {
 		return b.registerUserStartup(name, executable)
 	}
-	mode := "user"
-	runAs := ""
-	if b.system {
-		config, readErr := b.readConfig(name)
-		if readErr != nil {
-			return readErr
-		}
-		runAs = valueOr(config.RunAs, "SYSTEM")
-		switch {
-		case windowsBuiltInAccount(runAs):
-			mode = "service"
-		case strings.HasSuffix(runAs, "$"):
-			mode = "gmsa"
-		default:
-			mode = "password"
-		}
-	}
-	actionArgs := "__windows-supervise --root " + windowsQuoteCommand(b.root) + " " + windowsQuoteCommand(name)
-	cmd := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", windowsRegisterTaskScript)
-	cmd.Env = append(os.Environ(),
-		"SPM_TASK_NAME="+b.taskName(name),
-		"SPM_TASK_EXE="+executable,
-		"SPM_TASK_ARGS="+actionArgs,
-		"SPM_TASK_MODE="+mode,
-		"SPM_TASK_USER="+runAs,
-	)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, b.stdout, b.stderr
-	if mode == "password" {
-		fmt.Fprintf(b.stderr, "Enter the password for Windows service account %s when prompted. The password is stored by Task Scheduler, not by spm.\n", runAs)
-	}
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("register Windows startup task: %w", err)
-	}
-	return nil
 }
 
 func (b *windowsBackend) registerUserStartup(name, executable string) error {
@@ -1109,42 +1102,6 @@ $shortcut.WorkingDirectory = Split-Path -Parent $env:SPM_SHORTCUT_TARGET
 $shortcut.WindowStyle = 7
 $shortcut.Description = 'Start an spm user service at logon'
 $shortcut.Save()
-`
-
-const windowsRegisterTaskScript = `$ErrorActionPreference = 'Stop'
-$action = New-ScheduledTaskAction -Execute $env:SPM_TASK_EXE -Argument $env:SPM_TASK_ARGS
-$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
-switch ($env:SPM_TASK_MODE) {
-    'user' {
-        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-        $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
-        $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
-        Register-ScheduledTask -TaskName $env:SPM_TASK_NAME -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
-    }
-    'service' {
-        $trigger = New-ScheduledTaskTrigger -AtStartup
-        $principal = New-ScheduledTaskPrincipal -UserId $env:SPM_TASK_USER -LogonType ServiceAccount -RunLevel Highest
-        Register-ScheduledTask -TaskName $env:SPM_TASK_NAME -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
-    }
-    'gmsa' {
-        $trigger = New-ScheduledTaskTrigger -AtStartup
-        $principal = New-ScheduledTaskPrincipal -UserId $env:SPM_TASK_USER -LogonType ServiceAccount -RunLevel Limited
-        Register-ScheduledTask -TaskName $env:SPM_TASK_NAME -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
-    }
-    'password' {
-        $secure = Read-Host "Password for $env:SPM_TASK_USER" -AsSecureString
-        $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-        try {
-            $password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
-            $trigger = New-ScheduledTaskTrigger -AtStartup
-            Register-ScheduledTask -TaskName $env:SPM_TASK_NAME -Action $action -Trigger $trigger -Settings $settings -User $env:SPM_TASK_USER -Password $password -RunLevel Limited -Force | Out-Null
-        } finally {
-            if ($pointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer) }
-            $password = $null
-        }
-    }
-    default { throw "Unsupported spm task mode: $env:SPM_TASK_MODE" }
-}
 `
 
 func windowsRunAs(value string, system bool) (string, error) {
@@ -1221,13 +1178,7 @@ func (b *windowsBackend) unregister(name string) error {
 		}
 		return nil
 	}
-	cmd := exec.Command("schtasks.exe", "/Delete", "/TN", b.taskName(name), "/F")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	output, err := cmd.CombinedOutput()
-	if err != nil && !strings.Contains(strings.ToLower(string(output)), "cannot find") && !strings.Contains(strings.ToLower(string(output)), "not exist") {
-		return fmt.Errorf("remove logon task: %s: %w", strings.TrimSpace(string(output)), err)
-	}
-	return nil
+	return b.deleteSCMService(name)
 }
 
 func windowsStartupDirectory() (string, error) {
@@ -1245,15 +1196,6 @@ func windowsStartupDirectory() (string, error) {
 func (b *windowsBackend) startupPath(name string) string {
 	directory, _ := windowsStartupDirectory()
 	return filepath.Join(directory, "spm-"+name+".lnk")
-}
-
-func (b *windowsBackend) taskName(name string) string {
-	if b.system {
-		return "spm-system-" + name
-	}
-	username := valueOr(os.Getenv("USERNAME"), "current-user")
-	username = sanitizeName(strings.ReplaceAll(username, `\`, "-"))
-	return "spm-user-" + username + "-" + name
 }
 
 func windowsQuoteCommand(value string) string {
@@ -1313,7 +1255,12 @@ func (b *windowsBackend) status(name string) error {
 	if b.system {
 		scope, account = "system", valueOr(config.RunAs, "SYSTEM")
 	}
-	for _, row := range [][2]string{{"status", state.Status}, {"name", name}, {"scope", scope}, {"account", account}, {"enabled", strconv.FormatBool(config.Enabled)}, {"pid", valueOr(strconv.Itoa(state.PID), "-")}, {"supervisor pid", strconv.Itoa(state.SupervisorPID)}, {"restarts", strconv.Itoa(state.Restarts)}, {"uptime", uptime}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"log", b.logPath(name)}} {
+	rows := [][2]string{{"status", state.Status}, {"name", name}, {"scope", scope}, {"account", account}}
+	if b.system {
+		rows = append(rows, [2]string{"SCM service", b.scmName(name)})
+	}
+	rows = append(rows, [][2]string{{"enabled", strconv.FormatBool(config.Enabled)}, {"pid", valueOr(strconv.Itoa(state.PID), "-")}, {"supervisor pid", strconv.Itoa(state.SupervisorPID)}, {"restarts", strconv.Itoa(state.Restarts)}, {"uptime", uptime}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"log", b.logPath(name)}}...)
+	for _, row := range rows {
 		value := row[1]
 		if value == "0" && (row[0] == "pid" || row[0] == "supervisor pid") {
 			value = "-"
@@ -1450,7 +1397,7 @@ func (b *windowsBackend) removeMany(args []string) error {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
-		if config.Enabled {
+		if b.system || config.Enabled {
 			_ = b.unregister(name)
 		}
 		if err := removeWindowsServiceData(b.serviceDir(name)); err != nil {
@@ -1481,10 +1428,10 @@ func (b *windowsBackend) doctor() error {
 		failed = failed || status == "FAIL"
 	}
 	if b.system {
-		if _, err := exec.LookPath("schtasks.exe"); err != nil {
-			check("Task Scheduler", "FAIL", "schtasks.exe is unavailable")
+		if err := b.checkSCM(); err != nil {
+			check("Service manager", "FAIL", err.Error())
 		} else {
-			check("Task Scheduler", "OK", "available")
+			check("Service manager", "OK", "SCM available; services are visible in services.msc")
 		}
 	} else {
 		if startup, err := windowsStartupDirectory(); err != nil {

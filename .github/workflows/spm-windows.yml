@@ -10,14 +10,16 @@ permissions:
 
 jobs:
   test:
-    name: Windows tests (${{ matrix.arch }})
+    name: Windows ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: amd64
+          - name: Server 2022
+            runner: windows-2022
+          - name: Server 2025
             runner: windows-2025
 
     steps:
@@ -28,7 +30,9 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache-dependency-path: go.mod
+          cache-dependency-path: |
+            go.mod
+            go.sum
 
       - name: Test
         run: go test -cover ./...
@@ -39,54 +43,16 @@ jobs:
       - name: Build
         run: go build -buildvcs=false -o spm.exe ./cmd/spm
 
-      - name: Validate cross-platform declaration
+      - name: Exercise Windows user services
         shell: pwsh
+        env:
+          SPM_CI_PREFIX: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.runner }}
         run: |
-          @'
-          schema = 1
-          [[services]]
-          name = "ci-declaration"
-          command = ["cmd.exe", "/c", "exit", "0"]
-          [services.linux]
-          command = ["/usr/bin/true"]
-          user = "nobody"
-          [services.windows]
-          command = ["cmd.exe", "/c", "exit", "0"]
-          [services.macos]
-          command = ["/usr/bin/true"]
-          '@ | Set-Content -Encoding utf8 spm-ci.toml
-          .\spm.exe validate spm-ci.toml
-          .\spm.exe apply --dry-run spm-ci.toml
+          .\scripts\ci-windows-e2e.ps1 -Spm .\spm.exe -Scope User -Prefix $env:SPM_CI_PREFIX
 
-      - name: Exercise Windows user-service lifecycle
+      - name: Exercise Windows SCM services
         shell: pwsh
+        env:
+          SPM_CI_PREFIX: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.runner }}
         run: |
-          $env:SPM_WINDOWS_DATA_DIR = Join-Path $env:RUNNER_TEMP "spm-e2e"
-          $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\spm-ci-ping.lnk"
-          try {
-            .\spm.exe start --name ci-ping --restart no -- powershell.exe -NoProfile -Command "Start-Sleep -Seconds 60"
-            .\spm.exe list --json | ConvertFrom-Json | Where-Object name -eq "ci-ping" | ForEach-Object { if ($_.pid -le 0) { throw "service did not start" } }
-            .\spm.exe status ci-ping
-            if (-not (Test-Path -LiteralPath $shortcut)) { throw "Startup shortcut was not created" }
-            .\spm.exe disable ci-ping
-            .\spm.exe delete ci-ping
-          } finally {
-            .\spm.exe stop ci-ping 2>$null
-            Remove-Item -Force -LiteralPath $shortcut -ErrorAction SilentlyContinue
-            $global:LASTEXITCODE = 0
-          }
-
-      - name: Exercise Windows system-service lifecycle
-        shell: pwsh
-        run: |
-          $env:SPM_WINDOWS_DATA_DIR = Join-Path $env:RUNNER_TEMP "spm-system-e2e"
-          try {
-            .\spm.exe --system start --name ci-system --user LocalService --restart no --no-enable -- powershell.exe -NoProfile -Command "Start-Sleep -Seconds 60"
-            .\spm.exe --system status ci-system
-            .\spm.exe --system stop ci-system
-            .\spm.exe --system delete ci-system
-          } finally {
-            .\spm.exe --system stop ci-system 2>$null
-            schtasks.exe /Delete /TN spm-system-ci-system /F 2>$null
-            $global:LASTEXITCODE = 0
-          }
+          .\scripts\ci-windows-e2e.ps1 -Spm .\spm.exe -Scope System -Prefix $env:SPM_CI_PREFIX

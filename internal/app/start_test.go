@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -894,6 +895,25 @@ func TestStartStructuredLifecycleOptions(t *testing.T) {
 		if !strings.Contains(unit, want) {
 			t.Errorf("unit does not contain %q:\n%s", want, unit)
 		}
+	}
+}
+
+func TestPowerShellScriptRuntime(t *testing.T) {
+	wantRuntime := "pwsh"
+	wantOptions := []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-File"}
+	if runtime.GOOS == "windows" {
+		wantRuntime = "powershell.exe"
+		wantOptions = []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"}
+	}
+	gotRuntime, err := scriptRuntime("worker.PS1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRuntime != wantRuntime {
+		t.Fatalf("PowerShell runtime = %q, want %q", gotRuntime, wantRuntime)
+	}
+	if gotOptions := scriptRuntimeOptions("worker.PS1"); !reflect.DeepEqual(gotOptions, wantOptions) {
+		t.Fatalf("PowerShell options = %v, want %v", gotOptions, wantOptions)
 	}
 }
 

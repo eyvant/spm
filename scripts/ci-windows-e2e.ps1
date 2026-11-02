@@ -1,0 +1,196 @@
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)][string]$Spm,
+    [Parameter(Mandatory)][ValidateSet('User', 'System')][string]$Scope,
+    [string]$Prefix = "ci-$PID"
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+$Spm = [IO.Path]::GetFullPath($Spm)
+$repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$system = $Scope -eq 'System'
+$scopeArgs = if ($system) { @('--system') } else { @() }
+$prefix = ($Prefix.ToLowerInvariant() -replace '[^a-z0-9-]', '-')
+$main = "$prefix-$($Scope.ToLowerInvariant())-main"
+$dependency = "$prefix-$($Scope.ToLowerInvariant())-dependency"
+$dependent = "$prefix-$($Scope.ToLowerInvariant())-dependent"
+$declared = "$prefix-$($Scope.ToLowerInvariant())-declared"
+$crashing = "$prefix-user-crashing"
+$names = @($main, $dependency, $dependent, $declared, $crashing)
+$oldData = [Environment]::GetEnvironmentVariable('SPM_WINDOWS_DATA_DIR', 'Process')
+$tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { Join-Path $repo '.ci-tmp' }
+New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+$data = Join-Path $tempRoot "$prefix-$($Scope.ToLowerInvariant())-data"
+$toml = Join-Path $tempRoot "$prefix-$($Scope.ToLowerInvariant()).toml"
+$workload = Join-Path $repo 'scripts\spm-test-service.ps1'
+$workloadDir = $null
+
+if ($system) {
+    $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'System integration requires an elevated runner.'
+    }
+    $workloadDir = Join-Path $env:ProgramData "$prefix-spm-ci"
+    New-Item -ItemType Directory -Path $workloadDir -Force | Out-Null
+    & icacls.exe $workloadDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-19:(OI)(CI)M' '*S-1-5-20:(OI)(CI)M' '*S-1-5-32-544:(OI)(CI)F' /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to set workload directory ACLs.' }
+    $workload = Join-Path $workloadDir 'spm-test-service.ps1'
+    Copy-Item -LiteralPath (Join-Path $repo 'scripts\spm-test-service.ps1') -Destination $workload -Force
+    $systemSpm = Join-Path $workloadDir 'spm-ci.exe'
+    Copy-Item -LiteralPath $Spm -Destination $systemSpm -Force
+    $Spm = $systemSpm
+}
+
+function Invoke-Spm {
+    param([Parameter(Mandatory)][string[]]$Arguments, [switch]$Capture)
+    $output = & $script:Spm @script:scopeArgs @Arguments 2>&1
+    $code = $LASTEXITCODE
+    if ($code -ne 0) {
+        throw "spm failed ($code): $($Arguments -join ' ')`n$($output -join [Environment]::NewLine)"
+    }
+    if (-not $Capture) { $output | ForEach-Object { Write-Host $_ } }
+    return $output
+}
+
+function Remove-ServiceSafe([string]$Name) {
+    & $script:Spm @script:scopeArgs stop $Name 2>$null | Out-Null
+    & $script:Spm @script:scopeArgs delete --yes $Name 2>$null | Out-Null
+    if ($script:system) { & sc.exe delete "spm-$Name" 2>$null | Out-Null }
+}
+
+function Get-SpmRow([string]$Name) {
+    $json = (Invoke-Spm @('list', '--json') -Capture) -join [Environment]::NewLine
+    return @($json | ConvertFrom-Json) | Where-Object name -eq $Name
+}
+
+function Wait-Running([string]$Name) {
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        $row = Get-SpmRow $Name
+        if ($null -ne $row -and [int]$row.pid -gt 0) { return }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "$Name did not reach running state."
+}
+
+function Wait-Log([string]$Name, [string]$Pattern) {
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        try {
+            $log = (Invoke-Spm @('logs', '--lines', '100', '--grep', $Pattern, $Name) -Capture) -join "`n"
+            if ($log -match [regex]::Escape($Pattern)) { return }
+        } catch {}
+        Start-Sleep -Milliseconds 250
+    }
+    throw "$Name did not log $Pattern."
+}
+
+function Start-Workload([string]$Name, [string]$Account = '') {
+    $arguments = @('start', $script:workload, '--name', $Name, '--no-enable', '--restart', 'no', '--cwd', (Split-Path $script:workload))
+    if ($script:system -and $Account) { $arguments += @('--user', $Account) }
+    Invoke-Spm $arguments | Out-Null
+    Wait-Running $Name
+}
+
+try {
+    [Environment]::SetEnvironmentVariable('SPM_WINDOWS_DATA_DIR', $data, 'Process')
+    foreach ($name in $names) { Remove-ServiceSafe $name }
+
+    Write-Host "==> $Scope lifecycle, PowerShell inference, logs, and native inspection"
+    Start-Workload $main $(if ($system) { 'LocalService' } else { '' })
+    Wait-Log $main 'READY'
+    Invoke-Spm @('status', $main) | Out-Null
+    Invoke-Spm @('native', 'windows', 'inspect', $main) | Out-Null
+    Invoke-Spm @('restart', $main) | Out-Null
+    Wait-Running $main
+    if (-not $system -and $env:SPM_CI_SKIP_STARTUP -eq '1') {
+        Write-Host 'Skipping Startup-folder assertion in the local sandbox.'
+    } else {
+        Invoke-Spm @('enable', $main) | Out-Null
+    }
+    if ($system) {
+        $native = Get-CimInstance Win32_Service -Filter "Name='spm-$main'"
+        if ($native.State -ne 'Running' -or $native.StartMode -ne 'Auto' -or $native.StartName -notmatch 'LocalService') {
+            throw "Unexpected SCM state: $($native | Out-String)"
+        }
+    } elseif ($env:SPM_CI_SKIP_STARTUP -ne '1') {
+        $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\spm-$main.lnk"
+        if (-not (Test-Path -LiteralPath $shortcut)) { throw 'Startup shortcut was not created.' }
+    }
+    Invoke-Spm @('disable', $main) | Out-Null
+
+    Write-Host "==> $Scope dependency orchestration"
+    Start-Workload $dependency $(if ($system) { 'LocalService' } else { '' })
+    Invoke-Spm @('stop', $dependency) | Out-Null
+    $arguments = @('start', $workload, '--name', $dependent, '--no-enable', '--restart', 'no', '--cwd', (Split-Path $workload), '--requires', $dependency, '--after', $dependency)
+    if ($system) { $arguments += @('--user', 'LocalService') }
+    Invoke-Spm $arguments | Out-Null
+    Wait-Running $dependency
+    Wait-Running $dependent
+    if ($system) {
+        $qc = & sc.exe qc "spm-$dependent" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0 -or $qc -notmatch [regex]::Escape("spm-$dependency")) { throw "SCM dependency missing: $qc" }
+        Invoke-Spm @('stop', $dependent) | Out-Null
+        Invoke-Spm @('stop', $dependency) | Out-Null
+        Start-Service -Name "spm-$dependent"
+        (Get-Service -Name "spm-$dependent").WaitForStatus('Running', [TimeSpan]::FromSeconds(20))
+        (Get-Service -Name "spm-$dependency").WaitForStatus('Running', [TimeSpan]::FromSeconds(20))
+    }
+
+    Write-Host "==> $Scope declarative validate/apply/diff"
+    $ps = (Get-Command powershell.exe).Source.Replace('\', '\\')
+    $cwd = (Split-Path $workload).Replace('\', '\\')
+    $scriptPath = $workload.Replace('\', '\\')
+    $accountLine = if ($system) { 'user = "LocalService"' } else { '' }
+    $document = @"
+schema = 1
+[[services]]
+name = "$declared"
+cwd = "$cwd"
+command = ["$ps", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "$scriptPath", "-IntervalSeconds", "1"]
+restart = "no"
+enable = false
+[services.windows]
+$accountLine
+"@
+    [IO.File]::WriteAllText($toml, $document, [Text.UTF8Encoding]::new($false))
+    Invoke-Spm @('validate', $toml) | Out-Null
+    $plan = (Invoke-Spm @('apply', '--dry-run', $toml) -Capture) -join "`n"
+    if ($plan -notmatch "create`t$([regex]::Escape($declared))") { throw "Unexpected plan: $plan" }
+    Invoke-Spm @('apply', $toml) | Out-Null
+    Wait-Running $declared
+    $diff = (Invoke-Spm @('diff', $toml) -Capture) -join "`n"
+    if ($diff -notmatch "unchanged`t$([regex]::Escape($declared))") { throw "Unexpected diff: $diff" }
+
+    if (-not $system) {
+        Write-Host '==> User crash/restart policy'
+        $powershell = (Get-Command powershell.exe).Source
+        Invoke-Spm @('start', '--name', $crashing, '--no-enable', '--restart', 'on-failure', '--restart-sec', '200ms', '--', $powershell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $workload, '-IntervalSeconds', '1', '-ExitAfter', '1', '-ExitCode', '23') | Out-Null
+        for ($attempt = 0; $attempt -lt 60; $attempt++) {
+            $row = Get-SpmRow $crashing
+            if ($null -ne $row -and [int]$row.restarts -ge 2) { break }
+            Start-Sleep -Milliseconds 250
+        }
+        $row = Get-SpmRow $crashing
+        if ($null -eq $row -or [int]$row.restarts -lt 2) { throw 'Restart policy was not exercised.' }
+    } else {
+        Write-Host '==> Built-in SCM accounts'
+        foreach ($case in @(@('SYSTEM', 'LocalSystem'), @('LocalService', 'LocalService'), @('NetworkService', 'NetworkService'))) {
+            $accountName = $case[0]
+            $expected = $case[1]
+            $name = "$prefix-account-$($accountName.ToLowerInvariant())"
+            $names += $name
+            Start-Workload $name $accountName
+            $native = Get-CimInstance Win32_Service -Filter "Name='spm-$name'"
+            if ($native.StartName -notmatch $expected) { throw "$accountName mapped to $($native.StartName)" }
+            Remove-ServiceSafe $name
+        }
+    }
+    Write-Host "spm Windows $Scope integration passed" -ForegroundColor Green
+} finally {
+    foreach ($name in $names) { try { Remove-ServiceSafe $name } catch { Write-Warning $_ } }
+    [Environment]::SetEnvironmentVariable('SPM_WINDOWS_DATA_DIR', $oldData, 'Process')
+    Remove-Item -LiteralPath $toml -Force -ErrorAction SilentlyContinue
+    if ($system) { Remove-Item -LiteralPath $workloadDir -Recurse -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $data -Recurse -Force -ErrorAction SilentlyContinue
+}
