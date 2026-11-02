@@ -43,7 +43,9 @@ diagnose() {
   journalctl --no-pager -n 100 \
     -u "spm-$SERVICE.service" \
     -u "spm-$SERVICE.health.service" \
-    -u "spm-$SCHEDULE.service" >&2
+    -u "spm-$SCHEDULE.service" \
+    -u "spm-$CRASHING.service" >&2
+  echo "spm systemd integration test failed at line $line: $command" >&2
   exit "$exit_code"
 }
 
@@ -102,7 +104,10 @@ test ! -e /etc/systemd/system/spm-$SERVICE.cron-restart.timer
 systemctl start spm-$SERVICE.health.service
 "$SPM" --system show "$SERVICE" | grep -F healthy
 
-"$SPM" --system start --name "$CRASHING" --cwd /tmp --restart on-failure --restart-sec 200ms --no-enable -- /bin/sh -c 'exit 23'
+# Keep the first process alive long enough for `systemctl start` to observe the
+# active state. Newer systemd releases otherwise report the intentional early
+# failure from the start command itself before Restart= can be exercised.
+"$SPM" --system start --name "$CRASHING" --cwd /tmp --restart on-failure --restart-sec 200ms --no-enable -- /bin/sh -c 'sleep 0.2; exit 23'
 for _ in $(seq 1 40); do
   RESTARTS=$(systemctl show "spm-$CRASHING.service" --property=NRestarts --value)
   [[ ${RESTARTS:-0} -ge 2 ]] && break

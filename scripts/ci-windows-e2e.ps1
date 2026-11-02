@@ -45,18 +45,22 @@ if ($system) {
 
 function Invoke-Spm {
     param([Parameter(Mandatory)][string[]]$Arguments, [switch]$Capture)
-    $output = & $script:Spm @script:scopeArgs @Arguments 2>&1
+    # Keep the global scope prefix and command arguments in one native argv.
+    $commandArguments = @($script:scopeArgs) + @($Arguments)
+    $output = & $script:Spm @commandArguments 2>&1
     $code = $LASTEXITCODE
     if ($code -ne 0) {
-        throw "spm failed ($code): $($Arguments -join ' ')`n$($output -join [Environment]::NewLine)"
+        throw "spm failed ($code): $($commandArguments -join ' ')`n$($output -join [Environment]::NewLine)"
     }
     if (-not $Capture) { $output | ForEach-Object { Write-Host $_ } }
     return $output
 }
 
 function Remove-ServiceSafe([string]$Name) {
-    & $script:Spm @script:scopeArgs stop $Name 2>$null | Out-Null
-    & $script:Spm @script:scopeArgs delete --yes $Name 2>$null | Out-Null
+    $stopArguments = @($script:scopeArgs) + @('stop', $Name)
+    $deleteArguments = @($script:scopeArgs) + @('delete', '--yes', $Name)
+    & $script:Spm @stopArguments 2>$null | Out-Null
+    & $script:Spm @deleteArguments 2>$null | Out-Null
     if ($script:system) { & sc.exe delete "spm-$Name" 2>$null | Out-Null }
 }
 
