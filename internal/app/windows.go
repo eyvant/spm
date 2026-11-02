@@ -1136,7 +1136,7 @@ func windowsBuiltInAccount(value string) bool {
 }
 
 func (b *windowsBackend) secureSystemData(name, runAs string) error {
-	rootGrants := []string{"*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"}
+	rootGrants := windowsSystemRootACLGrants()
 	rootArgs := []string{b.root, "/inheritance:r", "/grant:r"}
 	rootArgs = append(rootArgs, rootGrants...)
 	rootArgs = append(rootArgs, "/Q")
@@ -1169,6 +1169,16 @@ func (b *windowsBackend) secureSystemData(name, runAs string) error {
 		return fmt.Errorf("secure system service data for %s: %s: %w", runAs, strings.TrimSpace(string(output)), err)
 	}
 	return nil
+}
+
+func windowsSystemRootACLGrants() []string {
+	return []string{
+		"*S-1-5-18:(OI)(CI)F",     // SYSTEM
+		"*S-1-5-32-544:(OI)(CI)F", // Administrators
+		"*S-1-5-19:(RX)",          // LocalService: traverse to its isolated service directory
+		"*S-1-5-20:(RX)",          // NetworkService: traverse to its isolated service directory
+		"*S-1-5-11:(RX)",          // Authenticated custom, gMSA, and virtual service accounts
+	}
 }
 
 func (b *windowsBackend) unregister(name string) error {

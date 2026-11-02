@@ -70,6 +70,15 @@ func TestWindowsVirtualServiceAccount(t *testing.T) {
 	}
 }
 
+func TestWindowsSystemRootACLGrantsAllowServiceAccountTraversal(t *testing.T) {
+	grants := strings.Join(windowsSystemRootACLGrants(), "\n")
+	for _, expected := range []string{"*S-1-5-19:(RX)", "*S-1-5-20:(RX)", "*S-1-5-11:(RX)"} {
+		if !strings.Contains(grants, expected) {
+			t.Fatalf("root ACL grants %q do not include %q", grants, expected)
+		}
+	}
+}
+
 func TestWindowsPreparesPowerShellScriptAutomatically(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "worker.ps1")
 	if err := os.WriteFile(path, []byte("Write-Output ready\n"), 0o600); err != nil {

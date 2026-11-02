@@ -22,7 +22,7 @@ $names = @($main, $dependency, $dependent, $declared, $crashing)
 $oldData = [Environment]::GetEnvironmentVariable('SPM_WINDOWS_DATA_DIR', 'Process')
 $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { Join-Path $repo '.ci-tmp' }
 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
-$data = Join-Path $tempRoot "$prefix-$($Scope.ToLowerInvariant())-data"
+$data = if ($system) { Join-Path $env:ProgramData "$prefix-spm-data" } else { Join-Path $tempRoot "$prefix-user-data" }
 $toml = Join-Path $tempRoot "$prefix-$($Scope.ToLowerInvariant()).toml"
 $workload = Join-Path $repo 'scripts\spm-test-service.ps1'
 $workloadDir = $null
