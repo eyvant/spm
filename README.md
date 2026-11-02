@@ -1,14 +1,14 @@
 # spm
 
-Run applications as persistent systemd services without writing unit files.
+Run applications as persistent services on Linux, Windows, and macOS without writing service definitions.
 
-`spm` gives systemd a small, PM2-like command line. It creates native units, uses journald for logs, and does not run its own daemon.
+`spm` provides one PM2-like command line across three native service managers. Linux uses systemd and journald, Windows uses a per-service supervisor plus Startup or Task Scheduler, and macOS uses launchd LaunchAgents or LaunchDaemons.
 
-> spm runs on Linux systems that use systemd. User services do not require root. Use `--system` explicitly when a service must run at the system level.
+> User services do not require elevation. Use `--system` explicitly when a service must run at the machine level.
 
 ## Install
 
-Install the latest release for your Linux architecture:
+Install the latest release on Linux or macOS:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eyvant/spm/main/install.sh | sh
@@ -24,6 +24,16 @@ curl -fsSL https://raw.githubusercontent.com/eyvant/spm/main/install.sh | sh -s 
 ```
 
 The `SPM_COMPLETION` environment variable also accepts `auto`, `bash`, `zsh`, `fish`, or `none`.
+
+On Windows, run PowerShell:
+
+```powershell
+irm https://github.com/eyvant/spm/releases/latest/download/install.ps1 | iex
+```
+
+The Windows installer verifies the release checksum, installs `spm.exe` under
+`%LOCALAPPDATA%\Programs\spm`, adds it to the user `PATH`, and installs dynamic
+PowerShell completion. Use `install.ps1 -NoCompletion` or `-NoPath` when needed.
 
 Install a specific version:
 
@@ -53,7 +63,7 @@ From the directory containing your application:
 spm start ./my-server --name my-server
 ```
 
-That one command:
+On Linux, that one command:
 
 1. Creates a native systemd user service.
 2. Uses the current directory as its working directory.
@@ -61,6 +71,51 @@ That one command:
 4. Enables it to start again with the user manager.
 5. Restarts it if it exits.
 6. Sends stdout and stderr to journald.
+
+On Windows it creates an equivalent user service: a detached supervisor owns
+the process and its restart policy, a hidden Startup shortcut launches enabled
+services at logon, and output is written below
+`%APPDATA%\spm\services\NAME`.
+
+On macOS it creates a LaunchAgent in `~/Library/LaunchAgents`; output and saved
+configuration live under the user's Application Support directory.
+
+## User and system services
+
+The default scope is per-user on all platforms:
+
+- Linux: runs under the systemd user manager and stores units in
+  `~/.config/systemd/user`.
+- Windows: runs as the current account, stores state in `%APPDATA%\spm`, and
+  starts when that user logs on.
+- macOS: runs as the current account through a LaunchAgent and starts at login.
+
+`--system` selects machine-wide services:
+
+- Linux: requires root and stores units in `/etc/systemd/system`.
+- Windows: requires an Administrator terminal, stores state in
+  `%ProgramData%\spm`, and starts at boot without a user login. The default
+  account is `LocalSystem`. Each service gets a private supervisor executable
+  and data directory so its account does not depend on an administrator's
+  profile or gain access to another service's configuration.
+- macOS: requires root, installs a LaunchDaemon in `/Library/LaunchDaemons`,
+  stores state in `/Library/Application Support/spm`, and starts at boot.
+
+Windows system services can select an account:
+
+```powershell
+spm --system start --user LocalService --name api -- .\api.exe
+spm --system start --user NetworkService --name proxy -- .\proxy.exe
+spm --system start --user 'DOMAIN\svc-api' --name api -- .\api.exe
+spm --system start --user 'DOMAIN\svc-api$' --name api -- .\api.exe
+```
+
+Aliases for `SYSTEM`, `LocalSystem`, `LocalService`, and `NetworkService` are
+accepted, as are group Managed Service Accounts (gMSA, ending in `$`). For a
+regular local or domain user, Task Scheduler prompts for the password and
+stores the credential; spm never writes it to its configuration. spm
+restricts `%ProgramData%\spm` ACLs to Administrators, SYSTEM, and the selected
+service account. `--group` is Unix-specific and rejected on Windows.
 
 Check it:
 
@@ -308,14 +363,23 @@ User units live in `~/.config/systemd/user`. System units live in `/etc/systemd/
 Use `spm.toml` when several services should be reviewed and applied together:
 
 ```toml
+schema = 1
+
 [[services]]
 name = "api"
-cwd = "/opt/api"
-command = ["node", "app.js", "--port", "3000"]
+command = ["node", "app.js", "--port", "3000"] # common defaults
 restart = "always"
 restart_sec = "3s"
-env_file = "/opt/api/.env"
+
+[services.linux]
+cwd = "/opt/api"
 max_memory = "512M"
+
+[services.windows]
+cwd = "C:\\apps\\api"
+
+[services.macos]
+cwd = "/Applications/api"
 
 [[services]]
 name = "worker"
@@ -326,11 +390,31 @@ interpreter = "python3"
 enable = false
 
 [[services]]
-name = "nightly-backup"
-cwd = "/opt/backup"
-command = ["./backup"]
-schedule = "0 2 * * *"
-persistent = true
+name = "database"
+command = ["./database"]
+
+[[services]]
+name = "frontend"
+command = ["./frontend"]
+requires = ["database"]
+after = ["database"]
+```
+
+Common values apply everywhere. `[services.linux]`, `[services.windows]`, and
+`[services.macos]` only override fields that genuinely differ. All platform
+blocks are syntax-checked, while each host applies its own block. Dependencies
+use the same `after`, `wants`, and `requires` fields: systemd receives native
+dependencies; when spm starts services, Windows and macOS use ordered spm
+orchestration. Their native boot/login managers may activate enabled jobs in
+parallel, so applications should still tolerate concurrent machine startup.
+
+The common UI remains the default. Platform-native details stay available
+through an explicit escape hatch:
+
+```text
+spm native systemd status api       # Linux
+spm native windows inspect api      # Windows
+spm native launchd print api        # macOS
 ```
 
 Preview and apply:
@@ -545,6 +629,12 @@ spm completion fish > ~/.config/fish/completions/spm.fish
 
 Completion understands subcommands, options, enum values, and managed service names. It switches to system services when `--system` is present.
 
+PowerShell:
+
+```powershell
+spm completion powershell | Out-String | Invoke-Expression
+```
+
 ## Troubleshooting
 
 Start with:
@@ -589,7 +679,10 @@ go build \
   -o spm ./cmd/spm
 ```
 
-GitHub Actions runs tests, vet, builds, and real systemd integration tests on Ubuntu 22.04, 24.04, and 26.04. A compatibility matrix covers Debian, Fedora, openSUSE, and Arch Linux and verifies generated units with `systemd-analyze verify`.
+GitHub Actions runs tests, vet, builds, and real lifecycle integration tests on
+Ubuntu, Windows Server, and macOS runners. Linux exercises systemd, Windows
+exercises user and system services, and macOS exercises LaunchAgents and
+LaunchDaemons. Releases include Linux, Windows, and macOS archives.
 
 ## License
 
@@ -597,7 +690,14 @@ spm is available under the [MIT License](LICENSE).
 
 ## Current limitations
 
-- Linux with systemd is required.
+- Linux requires systemd. Windows 10/11 and Windows Server use the per-user
+  Startup folder and Task Scheduler. macOS uses launchd.
+- Windows currently supports the core lifecycle, logs, restart policies,
+  readiness checks, user/system scopes, and selectable system accounts.
+  Scheduling, health timers, instances, resource limits, and systemd unit
+  import remain Linux-specific. macOS supports the common lifecycle, logs,
+  declarations, restart policies, readiness checks, dependencies, and both
+  LaunchAgent and LaunchDaemon scopes.
 - PM2 cluster-mode socket sharing, watch mode, deployment, and remote management are not implemented.
 - `--instances` provides fork-mode instances, not PM2 cluster mode.
 - spm does not install language runtimes or runtime managers.

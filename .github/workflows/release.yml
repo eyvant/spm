@@ -102,9 +102,103 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  build-windows:
+    name: Build ${{ matrix.name }}
+    needs: test
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-amd64
+            goarch: amd64
+          - name: windows-arm64
+            goarch: arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build archive
+        shell: bash
+        env:
+          GOOS: windows
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          archive="spm-${GITHUB_REF_NAME}-${{ matrix.name }}.zip"
+          mkdir -p build
+          go build -buildvcs=false -trimpath \
+            -ldflags="-s -w -X github.com/eyvant/spm/internal/app.version=${version}" \
+            -o build/spm.exe ./cmd/spm
+          cp LICENSE build/LICENSE
+          (cd build && zip -9 "../$archive" spm.exe LICENSE)
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: spm-${{ matrix.name }}
+          path: spm-*.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  build-macos:
+    name: Build ${{ matrix.name }}
+    needs: test
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-amd64
+            goarch: amd64
+          - name: macos-arm64
+            goarch: arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build archive
+        shell: bash
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          archive="spm-${GITHUB_REF_NAME}-${{ matrix.name }}.tar.gz"
+          mkdir -p build
+          go build -buildvcs=false -trimpath \
+            -ldflags="-s -w -X github.com/eyvant/spm/internal/app.version=${version}" \
+            -o build/spm ./cmd/spm
+          cp LICENSE build/LICENSE
+          tar -C build -czf "$archive" spm LICENSE
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: spm-${{ matrix.name }}
+          path: spm-*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, build-windows, build-macos]
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
@@ -120,10 +214,11 @@ jobs:
         shell: bash
         run: |
           cp install.sh dist/install.sh
+          cp install.ps1 dist/install.ps1
           cp LICENSE dist/LICENSE
           chmod 0755 dist/install.sh
           cd dist
-          sha256sum spm-*.tar.gz install.sh LICENSE > checksums.txt
+          sha256sum spm-*.tar.gz spm-*.zip install.sh install.ps1 LICENSE > checksums.txt
 
       - name: Create or update GitHub Release
         env:

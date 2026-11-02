@@ -1611,7 +1611,7 @@ func resolveExecutableFromPath(name, cwd, searchPath string) (string, error) {
 			return "", fmt.Errorf("resolve executable %q: %w", name, err)
 		}
 		info, err := os.Stat(absolute)
-		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+		if err != nil || info.IsDir() || runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 			return "", fmt.Errorf("executable %q does not exist or is not executable", absolute)
 		}
 		return absolute, nil

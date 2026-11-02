@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -147,7 +148,12 @@ func runProbeOnce(ctx context.Context, probe probeConfig) error {
 		}
 		return connection.Close()
 	case "command":
-		command := exec.CommandContext(ctx, "/bin/sh", "-c", probe.Target)
+		var command *exec.Cmd
+		if runtime.GOOS == "windows" {
+			command = exec.CommandContext(ctx, "cmd.exe", "/d", "/s", "/c", probe.Target)
+		} else {
+			command = exec.CommandContext(ctx, "/bin/sh", "-c", probe.Target)
+		}
 		command.Dir = probe.RuntimeCwd
 		if len(probe.RuntimeEnv) > 0 {
 			command.Env = append(os.Environ(), probe.RuntimeEnv...)

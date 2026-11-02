@@ -78,6 +78,80 @@ func TestParseServiceDeclarationsRejectsUnknownKeys(t *testing.T) {
 	}
 }
 
+func TestParseServiceDeclarationsAppliesPlatformOverlay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spm.toml")
+	data := []byte(`schema = 1
+[[services]]
+name = "api"
+command = ["common", "serve"]
+restart = "always"
+
+[services.linux]
+command = ["linux", "serve"]
+user = "www-data"
+
+[services.windows]
+command = ["windows.exe", "serve"]
+user = "LocalService"
+
+[services.macos]
+command = ["macos", "serve"]
+user = "_www"
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for platform, want := range map[string]struct {
+		command string
+		user    string
+	}{
+		"linux":   {"linux", "www-data"},
+		"windows": {"windows.exe", "LocalService"},
+		"macos":   {"macos", "_www"},
+	} {
+		services, err := parseServiceDeclarationsForPlatform(path, platform)
+		if err != nil {
+			t.Fatalf("%s: %v", platform, err)
+		}
+		if got := services[0]; got.Command[0] != want.command || got.User != want.user || got.Restart != "always" {
+			t.Fatalf("%s overlay = %#v", platform, got)
+		}
+	}
+}
+
+func TestParseServiceDeclarationsValidatesInactiveOverlay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spm.toml")
+	data := []byte("[[services]]\nname = \"api\"\ncommand = [\"go\", \"version\"]\n[services.windows]\nenable = maybe\n")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseServiceDeclarationsForPlatform(path, "linux"); err == nil {
+		t.Fatal("invalid inactive overlay unexpectedly succeeded")
+	}
+}
+
+func TestParseServiceDeclarationsOrdersDependencies(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spm.toml")
+	data := []byte(`[[services]]
+name = "api"
+command = ["api"]
+requires = ["database"]
+[[services]]
+name = "database"
+command = ["database"]
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	services, err := parseServiceDeclarationsForPlatform(path, "windows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if services[0].Name != "database" || services[1].Name != "api" {
+		t.Fatalf("dependency order = %s, %s", services[0].Name, services[1].Name)
+	}
+}
+
 func TestApplyCreatesDeclaredServices(t *testing.T) {
 	directory := localTempDir(t)
 	home, err := filepath.Abs(directory)

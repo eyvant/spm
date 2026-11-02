@@ -73,7 +73,11 @@ command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v tar >/dev/null 2>&1 || fail "tar is required"
 command -v install >/dev/null 2>&1 || fail "install is required"
 
-[ "$(uname -s)" = "Linux" ] || fail "spm only supports Linux"
+case "$(uname -s)" in
+  Linux) platform="linux" ;;
+  Darwin) platform="macos" ;;
+  *) fail "unsupported operating system: $(uname -s); Windows users should run install.ps1" ;;
+esac
 
 case "$(uname -m)" in
   x86_64|amd64)
@@ -83,9 +87,11 @@ case "$(uname -m)" in
     architecture="arm64"
     ;;
   armv7l|armv7)
+    [ "$platform" = "linux" ] || fail "unsupported architecture on macOS: $(uname -m)"
     architecture="armv7"
     ;;
   riscv64)
+    [ "$platform" = "linux" ] || fail "unsupported architecture on macOS: $(uname -m)"
     architecture="riscv64"
     ;;
   *)
@@ -109,12 +115,12 @@ case "$version" in
   *) fail "invalid release version: $version" ;;
 esac
 
-archive="spm-${version}-linux-${architecture}.tar.gz"
+archive="spm-${version}-${platform}-${architecture}.tar.gz"
 download_base="https://github.com/${repository}/releases/download/${version}"
 temporary_dir=$(mktemp -d)
 trap 'rm -rf "$temporary_dir"' EXIT HUP INT TERM
 
-printf 'Downloading spm %s for linux/%s...\n' "$version" "$architecture"
+printf 'Downloading spm %s for %s/%s...\n' "$version" "$platform" "$architecture"
 curl -fL --retry 3 --retry-delay 1 \
   -o "${temporary_dir}/${archive}" "${download_base}/${archive}"
 curl -fL --retry 3 --retry-delay 1 \

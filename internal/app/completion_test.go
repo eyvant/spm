@@ -27,7 +27,7 @@ func TestCompletionCandidatesUseCommandContextAndManagedNames(t *testing.T) {
 		{args: []string{"start", "--restart", "on-"}, want: []string{"on-abnormal", "on-abort", "on-failure", "on-success", "on-watchdog"}},
 		{args: []string{"logs", "api", "--f"}, want: []string{"--follow"}},
 		{args: []string{"logs", "api", "-f"}, want: []string{"-f"}},
-		{args: []string{"completion", ""}, want: []string{"bash", "fish", "zsh"}},
+		{args: []string{"completion", ""}, want: []string{"bash", "fish", "powershell", "zsh"}},
 	}
 	for _, test := range tests {
 		got := a.completionCandidates(test.args)
@@ -53,7 +53,7 @@ func containsCompletion(values []string, want string) bool {
 }
 
 func TestCompletionScriptsUseDynamicQuery(t *testing.T) {
-	for _, shell := range []string{"bash", "zsh", "fish"} {
+	for _, shell := range []string{"bash", "zsh", "fish", "powershell"} {
 		var output bytes.Buffer
 		if err := printCompletion(&output, []string{shell}); err != nil {
 			t.Fatal(err)

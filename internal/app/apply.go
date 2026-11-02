@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -372,6 +373,20 @@ func (service serviceDeclaration) startArgs(force, system bool) []string {
 }
 
 func parseServiceDeclarations(path string) ([]serviceDeclaration, error) {
+	platform := runtime.GOOS
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	return parseServiceDeclarationsForPlatform(path, platform)
+}
+
+func parseServiceDeclarationsForPlatform(path, platform string) ([]serviceDeclaration, error) {
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	if platform != "linux" && platform != "windows" && platform != "macos" {
+		return nil, fmt.Errorf("unsupported declaration platform %q", platform)
+	}
 	absolutePath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve service declaration path: %w", err)
@@ -385,6 +400,8 @@ func parseServiceDeclarations(path string) ([]serviceDeclaration, error) {
 
 	var services []serviceDeclaration
 	var current *serviceDeclaration
+	sectionPlatform := ""
+	schemaSeen := false
 	scanner := bufio.NewScanner(file)
 	for lineNumber := 1; scanner.Scan(); lineNumber++ {
 		line := strings.TrimSpace(stripTOMLComment(scanner.Text()))
@@ -394,16 +411,48 @@ func parseServiceDeclarations(path string) ([]serviceDeclaration, error) {
 		if line == "[[services]]" || line == "[[service]]" {
 			services = append(services, serviceDeclaration{})
 			current = &services[len(services)-1]
+			sectionPlatform = ""
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			if current == nil {
+				return nil, fmt.Errorf("%s:%d: platform tables must follow a [[services]] entry", path, lineNumber)
+			}
+			name := strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
+			prefix := "services."
+			if strings.HasPrefix(name, "service.") {
+				prefix = "service."
+			}
+			if !strings.HasPrefix(name, prefix) || strings.Contains(strings.TrimPrefix(name, prefix), ".") {
+				return nil, fmt.Errorf("%s:%d: unknown table %q", path, lineNumber, line)
+			}
+			sectionPlatform = strings.TrimPrefix(name, prefix)
+			if sectionPlatform == "darwin" {
+				sectionPlatform = "macos"
+			}
+			if sectionPlatform != "linux" && sectionPlatform != "windows" && sectionPlatform != "macos" {
+				return nil, fmt.Errorf("%s:%d: unknown platform table %q", path, lineNumber, line)
+			}
 			continue
 		}
 		if current == nil {
-			return nil, fmt.Errorf("%s:%d: values must be inside [[services]]", path, lineNumber)
+			key, raw, ok := strings.Cut(line, "=")
+			if !ok || strings.TrimSpace(key) != "schema" || strings.TrimSpace(raw) != "1" || schemaSeen {
+				return nil, fmt.Errorf("%s:%d: only schema = 1 is allowed before [[services]]", path, lineNumber)
+			}
+			schemaSeen = true
+			continue
 		}
 		key, raw, ok := strings.Cut(line, "=")
 		if !ok {
 			return nil, fmt.Errorf("%s:%d: expected key = value", path, lineNumber)
 		}
-		if err := setDeclarationValue(current, strings.TrimSpace(key), strings.TrimSpace(raw)); err != nil {
+		target := current
+		copyForValidation := *current
+		if sectionPlatform != "" && sectionPlatform != platform {
+			target = &copyForValidation
+		}
+		if err := setDeclarationValue(target, strings.TrimSpace(key), strings.TrimSpace(raw)); err != nil {
 			return nil, fmt.Errorf("%s:%d: %w", path, lineNumber, err)
 		}
 	}
@@ -444,7 +493,47 @@ func parseServiceDeclarations(path string) ([]serviceDeclaration, error) {
 		}
 		seen[service.Name] = true
 	}
-	return services, nil
+	return orderServiceDeclarations(services)
+}
+
+func orderServiceDeclarations(services []serviceDeclaration) ([]serviceDeclaration, error) {
+	byName := make(map[string]serviceDeclaration, len(services))
+	for _, service := range services {
+		byName[service.Name] = service
+	}
+	state := make(map[string]uint8, len(services))
+	ordered := make([]serviceDeclaration, 0, len(services))
+	var visit func(string) error
+	visit = func(name string) error {
+		switch state[name] {
+		case 1:
+			return fmt.Errorf("service dependency cycle includes %q", name)
+		case 2:
+			return nil
+		}
+		state[name] = 1
+		service := byName[name]
+		dependencies := append(append(append([]string(nil), service.Requires...), service.Wants...), service.After...)
+		for _, dependency := range dependencies {
+			if dependency == name {
+				return fmt.Errorf("service %q depends on itself", name)
+			}
+			if _, declared := byName[dependency]; declared {
+				if err := visit(dependency); err != nil {
+					return err
+				}
+			}
+		}
+		state[name] = 2
+		ordered = append(ordered, service)
+		return nil
+	}
+	for _, service := range services {
+		if err := visit(service.Name); err != nil {
+			return nil, err
+		}
+	}
+	return ordered, nil
 }
 
 func setDeclarationValue(service *serviceDeclaration, key, raw string) error {

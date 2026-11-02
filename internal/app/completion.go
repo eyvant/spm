@@ -13,6 +13,7 @@ var completionCommands = []string{
 	"restart", "stop", "reload", "enable", "disable", "delete", "remove", "rm", "set", "unset",
 	"clone", "history", "rollback", "startup", "apply", "validate", "diff", "security",
 	"export", "health", "import", "signal", "kill", "scale", "doctor", "completion", "help", "version",
+	"native",
 }
 
 var signalCompletionValues = []string{"SIGHUP", "SIGINT", "SIGQUIT", "SIGTERM", "SIGKILL", "SIGUSR1", "SIGUSR2", "SIGWINCH", "SIGCONT", "SIGSTOP"}
@@ -49,7 +50,7 @@ var configCompletionOptions = []string{
 
 func printCompletion(w io.Writer, args []string) error {
 	if len(args) != 1 {
-		return errors.New("completion requires one shell: bash, zsh, or fish")
+		return errors.New("completion requires one shell: bash, zsh, fish, or powershell")
 	}
 	var script string
 	switch args[0] {
@@ -59,8 +60,10 @@ func printCompletion(w io.Writer, args []string) error {
 		script = zshCompletionScript
 	case "fish":
 		script = fishCompletionScript
+	case "powershell", "pwsh":
+		script = powershellCompletionScript
 	default:
-		return fmt.Errorf("unsupported completion shell %q; use bash, zsh, or fish", args[0])
+		return fmt.Errorf("unsupported completion shell %q; use bash, zsh, fish, or powershell", args[0])
 	}
 	_, err := io.WriteString(w, script)
 	return err
@@ -68,6 +71,12 @@ func printCompletion(w io.Writer, args []string) error {
 
 func runCompletionQuery(args []string, stdout io.Writer) error {
 	system := len(args) > 0 && args[0] == "--system"
+	if a, ok := platformCompletionApplication(stdout, system); ok {
+		for _, candidate := range a.completionCandidates(args) {
+			fmt.Fprintln(stdout, candidate)
+		}
+		return nil
+	}
 	unitDir := "/etc/systemd/system"
 	if !system {
 		var err error
@@ -149,7 +158,7 @@ func (a *application) completionCandidates(args []string) []string {
 	case "export":
 		return filterCompletionCandidates(a.completionServiceNames(true), current)
 	case "completion":
-		return filterCompletionCandidates([]string{"bash", "zsh", "fish"}, current)
+		return filterCompletionCandidates([]string{"bash", "zsh", "fish", "powershell"}, current)
 	}
 	return nil
 }
@@ -265,4 +274,14 @@ const fishCompletionScript = `function __spm_completion
 end
 complete -c spm -f -a '(__spm_completion)'
 complete -c spm -n '__fish_seen_subcommand_from apply validate diff import' -F
+`
+
+const powershellCompletionScript = `Register-ArgumentCompleter -Native -CommandName spm -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+    $tokens = @($commandAst.CommandElements | Select-Object -Skip 1 | ForEach-Object { $_.ToString() })
+    if ($commandAst.ToString().EndsWith(' ')) { $tokens += '' }
+    spm __complete @tokens 2>$null | ForEach-Object {
+        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    }
+}
 `

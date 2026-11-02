@@ -82,6 +82,8 @@ type application struct {
 	system    bool
 	sleep     func(time.Duration)
 	userHome  func(string) (string, error)
+	// managedNamesOverride supplies platform-native names outside systemd.
+	managedNamesOverride func() ([]string, error)
 	// watchLimit bounds `list --watch` refreshes in tests; 0 means unlimited.
 	watchLimit int
 }
@@ -173,8 +175,14 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	if hasCommandHelp(args[1:]) {
 		return printCommandHelp(stdout, args[0])
 	}
+	if runtime.GOOS == "windows" {
+		return runWindows(args, stdout, stderr, system)
+	}
+	if runtime.GOOS == "darwin" {
+		return runDarwin(args, stdout, stderr, system)
+	}
 	if runtime.GOOS != "linux" {
-		return errors.New("spm only supports Linux with systemd")
+		return fmt.Errorf("spm does not support %s; Linux, Windows, and macOS are supported", runtime.GOOS)
 	}
 
 	unitDir := "/etc/systemd/system"
@@ -263,6 +271,8 @@ func (a *application) run(args []string) error {
 		return a.apply(args[1:])
 	case "validate", "diff":
 		return a.inspectDeclaration(args[0], args[1:])
+	case "native":
+		return a.native(args[1:])
 	case "security":
 		name, err := oneName(args[1:])
 		if err != nil {
@@ -289,7 +299,24 @@ func (a *application) run(args []string) error {
 	}
 }
 
+func (a *application) native(args []string) error {
+	if len(args) != 3 || args[0] != "systemd" || (args[1] != "status" && args[1] != "show" && args[1] != "cat") {
+		return errors.New("usage: spm native systemd status|show|cat <name>")
+	}
+	name := args[2]
+	if err := validateName(name); err != nil {
+		return err
+	}
+	if !a.exists(name) {
+		return fmt.Errorf("service %q is not managed by spm", name)
+	}
+	return a.runner.Interactive(a.input(), a.stdout, a.stderr, "systemctl", append(a.systemctlArgs(args[1]), a.serviceUnits(name)[0])...)
+}
+
 func printHelp(w io.Writer) {
+	if printPlatformHelp(w) {
+		return
+	}
 	fmt.Fprint(w, `spm - manage persistent systemd services without writing unit files
 
 Usage:
@@ -418,6 +445,9 @@ func hasCommandHelp(args []string) bool {
 }
 
 func printCommandHelp(w io.Writer, command string) error {
+	if printPlatformCommandHelp(w, command) {
+		return nil
+	}
 	switch command {
 	case "start":
 		fmt.Fprint(w, `Usage:
@@ -567,6 +597,8 @@ Options may appear before or after the service name.
 		fmt.Fprintln(w, "Usage:\n  spm apply [--dry-run] spm.toml")
 	case "validate", "diff":
 		fmt.Fprintf(w, "Usage:\n  spm %s spm.toml\n", command)
+	case "native":
+		fmt.Fprintln(w, "Usage:\n  spm native systemd status|show|cat <name>")
 	case "security":
 		fmt.Fprintln(w, "Usage:\n  spm security <name>")
 	case "export":
@@ -1130,6 +1162,9 @@ func (a *application) readScheduleStates(names []string) map[string]serviceState
 }
 
 func (a *application) managedNames() ([]string, error) {
+	if a.managedNamesOverride != nil {
+		return a.managedNamesOverride()
+	}
 	entries, err := os.ReadDir(a.unitDir)
 	if err != nil {
 		if os.IsNotExist(err) {
