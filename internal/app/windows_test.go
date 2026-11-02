@@ -3,6 +3,7 @@
 package app
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -76,6 +77,29 @@ func TestWindowsSystemRootACLGrantsAllowServiceAccountTraversal(t *testing.T) {
 		if !strings.Contains(grants, expected) {
 			t.Fatalf("root ACL grants %q do not include %q", grants, expected)
 		}
+	}
+}
+
+func TestWindowsSystemDataACLKeepsConfigAccessible(t *testing.T) {
+	if !windowsIsElevated() {
+		t.Skip("requires elevated token to test SYSTEM/Administrators ACLs")
+	}
+	b := &windowsBackend{root: t.TempDir(), system: true, stdout: io.Discard, stderr: io.Discard}
+	config := windowsServiceConfig{Version: windowsStateVersion, Name: "acl-test", Command: []string{"cmd.exe"}, RunAs: `NT AUTHORITY\LOCALSERVICE`}
+	if err := b.writeConfig(config); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.secureSystemData(config.Name, config.RunAs); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.readConfig(config.Name); err != nil {
+		t.Fatalf("config inaccessible after securing ACLs: %v", err)
+	}
+	if err := b.writeConfig(config); err != nil {
+		t.Fatalf("cannot replace secured config: %v", err)
+	}
+	if _, err := b.readConfig(config.Name); err != nil {
+		t.Fatal(err)
 	}
 }
 

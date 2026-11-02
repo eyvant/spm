@@ -1150,11 +1150,6 @@ func (b *windowsBackend) secureSystemData(name, runAs string) error {
 			return fmt.Errorf("secure system service container %s: %s: %w", directory, strings.TrimSpace(string(output)), err)
 		}
 	}
-	resetCommand := exec.Command("icacls.exe", b.serviceDir(name), "/reset", "/T", "/C", "/Q")
-	resetCommand.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if output, err := resetCommand.CombinedOutput(); err != nil {
-		return fmt.Errorf("reset system service ACLs: %s: %w", strings.TrimSpace(string(output)), err)
-	}
 	grants := []string{"*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"}
 	switch strings.ToUpper(strings.ReplaceAll(runAs, " ", "")) {
 	case "SYSTEM", `NTAUTHORITY\SYSTEM`:
@@ -1167,11 +1162,25 @@ func (b *windowsBackend) secureSystemData(name, runAs string) error {
 	}
 	args := []string{b.serviceDir(name), "/inheritance:r", "/grant:r"}
 	args = append(args, grants...)
-	args = append(args, "/T", "/C", "/Q")
+	args = append(args, "/Q")
 	cmd := exec.Command("icacls.exe", args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("secure system service data for %s: %s: %w", runAs, strings.TrimSpace(string(output)), err)
+	}
+	// Apply inheritable ACEs to the directory only. Applying /inheritance:r
+	// recursively removes effective inherited permissions from ordinary files.
+	// Reset children afterwards so they inherit the completed directory ACL.
+	entries, err := os.ReadDir(b.serviceDir(name))
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		resetCommand := exec.Command("icacls.exe", filepath.Join(b.serviceDir(name), entry.Name()), "/reset", "/T", "/Q")
+		resetCommand.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		if output, err := resetCommand.CombinedOutput(); err != nil {
+			return fmt.Errorf("inherit system service file ACLs: %s: %w", strings.TrimSpace(string(output)), err)
+		}
 	}
 	return nil
 }

@@ -19,6 +19,8 @@ cleanup() {
     "$SPM" delete --yes "$name" >/dev/null 2>&1
   done
   rm -f "$TOML"
+  rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/spm-$CRASHING.service.d/crash.conf"
+  rmdir "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/spm-$CRASHING.service.d" 2>/dev/null || true
 }
 diagnose() {
   local code=$?
@@ -52,9 +54,12 @@ systemctl --user is-active --quiet "spm-$MAIN.service"
 systemctl --user is-active --quiet "spm-$DEPENDENCY.service"
 systemctl --user is-active --quiet "spm-$DEPENDENT.service"
 
-if ! "$SPM" start --name "$CRASHING" --no-enable --restart on-failure --restart-sec 100ms -- /bin/sh -c 'sleep 0.2; exit 23'; then
-  echo "spm start observed the intentional crash; checking native restart state" >&2
-fi
+"$SPM" start --name "$CRASHING" --no-enable --restart on-failure --restart-sec 100ms -- /bin/sleep 300
+CRASH_DROPIN=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/spm-$CRASHING.service.d
+mkdir -p "$CRASH_DROPIN"
+printf '[Service]\nExecStart=\nExecStart=/bin/sh -c "sleep 0.2; exit 23"\n' >"$CRASH_DROPIN/crash.conf"
+systemctl --user daemon-reload
+systemctl --user restart "spm-$CRASHING.service"
 test "$(systemctl --user show "spm-$CRASHING.service" --property=Restart --value)" = on-failure
 for _ in {1..40}; do
   RESTARTS=$(systemctl --user show "spm-$CRASHING.service" -p NRestarts --value)

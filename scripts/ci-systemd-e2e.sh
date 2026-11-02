@@ -58,6 +58,8 @@ cleanup() (
   "$SPM" --system delete "$DEPENDENCY" >/dev/null 2>&1
   "$SPM" --system delete "$DECLARED" >/dev/null 2>&1
   "$SPM" --system delete "$CRASHING" >/dev/null 2>&1
+  rm -f "/etc/systemd/system/spm-$CRASHING.service.d/crash.conf"
+  rmdir "/etc/systemd/system/spm-$CRASHING.service.d" 2>/dev/null || true
   rm -f "$MARKER" "$TOML"
 )
 trap 'diagnose "$?" "$LINENO" "$BASH_COMMAND"' ERR
@@ -104,13 +106,13 @@ test ! -e /etc/systemd/system/spm-$SERVICE.cron-restart.timer
 systemctl start spm-$SERVICE.health.service
 "$SPM" --system show "$SERVICE" | grep -F healthy
 
-# systemd versions differ on whether `systemctl start` returns success after
-# observing an initially-active service that then fails during the same start
-# transaction. The unit and its restart counter are the assertions here, so an
-# exit caused by the intentional crash is acceptable.
-if ! "$SPM" --system start --name "$CRASHING" --cwd /tmp --restart on-failure --restart-sec 200ms --no-enable -- /bin/sh -c 'sleep 0.2; exit 23'; then
-  echo "spm start observed the intentional crash; checking native restart state" >&2
-fi
+# Start a stable service before injecting failure, so spm's startup-settle
+# validation cannot roll back the unit under test.
+"$SPM" --system start --name "$CRASHING" --cwd /tmp --restart on-failure --restart-sec 200ms --no-enable -- /bin/sleep 300
+mkdir -p "/etc/systemd/system/spm-$CRASHING.service.d"
+printf '[Service]\nExecStart=\nExecStart=/bin/sh -c "sleep 0.2; exit 23"\n' >"/etc/systemd/system/spm-$CRASHING.service.d/crash.conf"
+systemctl daemon-reload
+systemctl restart "spm-$CRASHING.service"
 test "$(systemctl show "spm-$CRASHING.service" --property=Restart --value)" = on-failure
 for _ in $(seq 1 40); do
   RESTARTS=$(systemctl show "spm-$CRASHING.service" --property=NRestarts --value)
