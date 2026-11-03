@@ -6,6 +6,7 @@ name: Release
       - "v*"
 
 permissions:
+  actions: read
   contents: write
 
 concurrency:
@@ -13,19 +14,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test:
-    name: Test release
+  validate:
+    name: Validate release tag
     runs-on: ubuntu-24.04
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: go.mod
-
       - name: Validate release tag
         shell: bash
         run: |
@@ -34,24 +26,59 @@ jobs:
             exit 1
           fi
 
-      - name: Run tests
-        run: go test -race ./...
-
-      - name: Run vet
-        run: go vet ./...
-
-      - name: Run real systemd integration test
+  ci:
+    name: Require successful CI
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Wait for CI workflows
+        shell: bash
         env:
-          SPM_CI_PREFIX: release-${{ github.run_id }}-${{ github.run_attempt }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          go build -buildvcs=false -o spm-ci ./cmd/spm
-          sudo install -m 0755 ./spm-ci /usr/local/bin/spm-ci
-          trap 'sudo rm -f /usr/local/bin/spm-ci' EXIT
-          sudo --preserve-env=SPM_CI_PREFIX bash scripts/ci-systemd-e2e.sh /usr/local/bin/spm-ci
+          workflows=(spm-linux.yml spm-macos.yml spm-windows.yml)
+          pending=("${workflows[@]}")
+
+          while ((${#pending[@]})); do
+            next=()
+
+            for workflow in "${pending[@]}"; do
+              run=$(gh api --method GET \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs" \
+                -f head_sha="$GITHUB_SHA" \
+                -f event=push \
+                -f per_page=10 \
+                --jq '.workflow_runs | sort_by(.id) | reverse | .[0] // empty')
+
+              if [[ -z "$run" ]]; then
+                echo "$workflow: waiting for a run on $GITHUB_SHA"
+                next+=("$workflow")
+                continue
+              fi
+
+              status=$(jq -r '.status' <<<"$run")
+              conclusion=$(jq -r '.conclusion // ""' <<<"$run")
+              url=$(jq -r '.html_url' <<<"$run")
+
+              if [[ "$status" != completed ]]; then
+                echo "$workflow: $status ($url)"
+                next+=("$workflow")
+              elif [[ "$conclusion" == success ]]; then
+                echo "$workflow: success ($url)"
+              else
+                echo "$workflow: required CI concluded with $conclusion ($url)" >&2
+                exit 1
+              fi
+            done
+
+            pending=("${next[@]}")
+            ((${#pending[@]})) && sleep 20
+          done
 
   build:
     name: Build ${{ matrix.name }}
-    needs: test
+    needs: ci
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -104,7 +131,7 @@ jobs:
 
   build-windows:
     name: Build ${{ matrix.name }}
-    needs: test
+    needs: ci
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -151,7 +178,7 @@ jobs:
 
   build-macos:
     name: Build ${{ matrix.name }}
-    needs: test
+    needs: ci
     runs-on: macos-15
     strategy:
       fail-fast: false
