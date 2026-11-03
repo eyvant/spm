@@ -608,6 +608,72 @@ Saved normalized configurations use mode `0600` and live in:
 | `pm2 save` | Not needed; spm enables services when they are created. |
 | PM2 ecosystem file | `spm export all > spm.toml`, then `spm apply spm.toml` |
 
+## Agent and MCP integration
+
+`spm` includes a local stdio MCP server so Codex and other MCP clients can
+inspect and manage services through focused, structured tools:
+
+```bash
+spm mcp
+```
+
+Add it to Codex after installing `spm`:
+
+```bash
+codex mcp add spm -- spm mcp
+```
+
+Or add the server directly to `~/.codex/config.toml` (or a trusted project's
+`.codex/config.toml`):
+
+```toml
+[mcp_servers.spm]
+command = "spm"
+args = ["mcp"]
+default_tools_approval_mode = "writes"
+```
+
+Restart the Codex client after changing its configuration. The server exposes
+read-only tools for listing, inspecting, diagnostics, and bounded log reads,
+plus focused write tools for creating and controlling services. The
+`spm_run_cli` escape hatch covers all other non-interactive CLI functionality,
+including schedules, signals, scaling, configuration revisions, declarative
+apply/diff, import/export, health, and native inspection. Interactive editors
+and unbounded `logs --follow` or `list --watch` calls are intentionally rejected
+because an MCP tool call must finish. The general CLI tool and service deletion
+are marked destructive so MCP hosts can request approval. Machine-wide calls
+use the tool's `system` option and remain subject to normal platform privilege
+checks.
+
+Claude Code uses the same stdio server:
+
+```bash
+claude mcp add spm -- spm mcp
+```
+
+Run `/mcp` inside Claude Code to verify that the server is connected and its
+tools are available. For Claude Desktop, add the following entry to
+`claude_desktop_config.json` and fully restart the app:
+
+```json
+{
+  "mcpServers": {
+    "spm": {
+      "command": "spm",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Claude Desktop may start with a minimal `PATH`. If it cannot find `spm`, replace
+the command with the absolute path to `spm` or `spm.exe`. On Windows the config
+file is normally `%APPDATA%\Claude\claude_desktop_config.json`; on macOS it is
+`~/Library/Application Support/Claude/claude_desktop_config.json`.
+
+Secrets should stay in an environment file referenced by `env_file`; do not put
+secret values directly in MCP tool arguments.
+
 ## Shell completion
 
 Bash:

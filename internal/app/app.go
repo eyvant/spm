@@ -133,6 +133,12 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		printHelp(stdout)
 		return nil
 	}
+	if args[0] == "mcp" {
+		if len(args) != 1 {
+			return errors.New("mcp does not accept arguments")
+		}
+		return serveMCP(os.Stdin, stdout)
+	}
 	if args[0] == "__complete" {
 		return runCompletionQuery(args[1:], stdout)
 	}
@@ -350,6 +356,7 @@ Common commands:
   spm export <name|all>
   spm health <name>
   spm import <unit-file> [--name NAME]
+  spm mcp
   spm completion bash|zsh|fish
 
 Global options:
@@ -607,6 +614,8 @@ Options may appear before or after the service name.
 		fmt.Fprintln(w, "Usage:\n  spm health <name>")
 	case "import":
 		fmt.Fprintln(w, "Usage:\n  spm import <unit-file> [--name NAME]")
+	case "mcp":
+		fmt.Fprintln(w, "Usage:\n  spm mcp\n\nRun the local stdio MCP server for Codex and other MCP clients.")
 	case "version":
 		fmt.Fprintln(w, "Usage:\n  spm version")
 	case "completion":

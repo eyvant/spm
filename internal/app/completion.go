@@ -12,7 +12,7 @@ var completionCommands = []string{
 	"start", "schedule", "run", "list", "ls", "status-all", "status", "show", "describe", "logs", "cat", "edit",
 	"restart", "stop", "reload", "enable", "disable", "delete", "remove", "rm", "set", "unset",
 	"clone", "history", "rollback", "startup", "apply", "validate", "diff", "security",
-	"export", "health", "import", "signal", "kill", "scale", "doctor", "completion", "help", "version",
+	"export", "health", "import", "signal", "kill", "scale", "doctor", "mcp", "completion", "help", "version",
 	"native",
 }
 
