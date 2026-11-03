@@ -73,8 +73,12 @@ jobs:
             done
 
             pending=("${next[@]}")
-            ((${#pending[@]})) && sleep 20
+            if ((${#pending[@]})); then
+              sleep 20
+            fi
           done
+
+          echo "All required CI workflows succeeded."
 
   build:
     name: Build ${{ matrix.name }}
