@@ -323,7 +323,7 @@ func printHelp(w io.Writer) {
 	if printPlatformHelp(w) {
 		return
 	}
-	fmt.Fprint(w, `spm - manage persistent systemd services without writing unit files
+	fmt.Fprint(w, `spm - a simple, cross-platform manager for native system services
 
 Usage:
   spm [--system] <command> [options]

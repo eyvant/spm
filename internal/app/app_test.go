@@ -160,6 +160,9 @@ func TestSubcommandHelp(t *testing.T) {
 func TestGlobalHelpShowsSystemAsGlobalOptionOnly(t *testing.T) {
 	var output bytes.Buffer
 	printHelp(&output)
+	if !strings.Contains(output.String(), "spm - a simple, cross-platform manager for native system services") {
+		t.Fatalf("global help does not contain the product description:\n%s", output.String())
+	}
 	if count := strings.Count(output.String(), "[--system]"); count != 1 {
 		t.Fatalf("global help contains [--system] %d times:\n%s", count, output.String())
 	}

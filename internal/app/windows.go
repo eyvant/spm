@@ -134,7 +134,7 @@ func platformCompletionApplication(stdout io.Writer, system bool) (*application,
 }
 
 func printPlatformHelp(w io.Writer) bool {
-	fmt.Fprint(w, `spm - manage persistent applications on Windows
+	fmt.Fprint(w, `spm - a simple, cross-platform manager for native system services
 
 Usage:
   spm [--system] <command> [options]
