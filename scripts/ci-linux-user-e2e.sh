@@ -8,17 +8,21 @@ MAIN=$PREFIX-main
 DEPENDENCY=$PREFIX-dependency
 DEPENDENT=$PREFIX-dependent
 DECLARED=$PREFIX-declared
+SCHEDULE=$PREFIX-schedule
+SCHEDULE_DECLARED=$PREFIX-schedule-declared
 CRASHING=$PREFIX-crashing
 TOML=/tmp/$PREFIX.toml
 MARKER=SPM_LINUX_USER_READY_$PREFIX
+SCHEDULE_MARKER=/tmp/$PREFIX-schedule-marker
 
 cleanup() {
   trap - ERR
   set +e
-  for name in "$CRASHING" "$DEPENDENT" "$DEPENDENCY" "$DECLARED" "$MAIN"; do
+  for name in "$CRASHING" "$SCHEDULE_DECLARED" "$SCHEDULE" "$DEPENDENT" "$DEPENDENCY" "$DECLARED" "$MAIN"; do
     "$SPM" delete --yes "$name" >/dev/null 2>&1
   done
   rm -f "$TOML"
+  rm -f "$SCHEDULE_MARKER"
   rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/spm-$CRASHING.service.d/crash.conf"
   rmdir "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/spm-$CRASHING.service.d" 2>/dev/null || true
 }
@@ -87,6 +91,29 @@ EOF
 "$SPM" apply "$TOML"
 systemctl --user is-active --quiet "spm-$DECLARED.service"
 "$SPM" diff "$TOML" | grep -F $'unchanged\t'"$DECLARED"
+
+"$SPM" schedule --name "$SCHEDULE" --cron '*/15 * 1 * 1-5' --timezone UTC --persistent --run-now -- /usr/bin/touch "$SCHEDULE_MARKER"
+test -e "$SCHEDULE_MARKER"
+SCHEDULE_TIMER=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/spm-$SCHEDULE.timer
+test -f "$SCHEDULE_TIMER"
+grep -c '^OnCalendar=' "$SCHEDULE_TIMER" | grep -Fx 2
+systemctl --user is-active --quiet "spm-$SCHEDULE.timer"
+
+cat >>"$TOML" <<EOF
+
+[[services]]
+name = "$SCHEDULE_DECLARED"
+command = ["/usr/bin/true"]
+schedule = "*/5 9-17/2 1 * 1-5/2"
+timezone = "UTC"
+persistent = true
+enable = false
+EOF
+"$SPM" validate "$TOML"
+"$SPM" apply "$TOML"
+test -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/spm-$SCHEDULE_DECLARED.timer"
+test "$(systemctl --user is-enabled "spm-$SCHEDULE_DECLARED.timer" || true)" = disabled
+"$SPM" diff "$TOML" | grep -F $'unchanged\t'"$SCHEDULE_DECLARED"
 
 cleanup
 echo "spm Linux user integration passed"

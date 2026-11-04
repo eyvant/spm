@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 type scheduleOptions struct {
@@ -42,6 +43,11 @@ func validatePersistedSchedule(config persistedStartConfig) error {
 	if config.Timezone != "" && config.Schedule == "" {
 		return errors.New("timezone requires a cron schedule")
 	}
+	if config.Timezone != "" {
+		if _, err := loadScheduleLocation(config.Timezone); err != nil {
+			return err
+		}
+	}
 	if config.Instances > 0 {
 		return errors.New("scheduled tasks cannot run multiple instances")
 	}
@@ -51,6 +57,15 @@ func validatePersistedSchedule(config persistedStartConfig) error {
 	for field, value := range map[string]string{"timer_on_boot": config.TimerOnBoot, "timer_interval": config.TimerInterval, "timer_randomized_delay": config.TimerRandomDelay} {
 		if value != "" && !validSystemdDuration(value) {
 			return fmt.Errorf("invalid %s duration %q", field, value)
+		}
+		if value != "" {
+			duration, err := parsePortableDuration(value)
+			if err != nil {
+				return fmt.Errorf("invalid portable %s duration %q", field, value)
+			}
+			if field == "timer_interval" && duration < time.Minute {
+				return errors.New("timer_interval must be at least 1min on portable schedules")
+			}
 		}
 	}
 	_, err := scheduleCalendar(config)
@@ -76,8 +91,10 @@ func (a *application) schedule(args []string) error {
 	}
 	a.warnSandboxSupport(options.start)
 	if options.calendar != "" {
-		if _, err := a.runner.Run("systemd-analyze", "calendar", options.calendar); err != nil {
-			return fmt.Errorf("validate schedule calendar %q: %w", options.calendar, err)
+		for _, calendar := range strings.Split(options.calendar, "\nOnCalendar=") {
+			if _, err := a.runner.Run("systemd-analyze", "calendar", calendar); err != nil {
+				return fmt.Errorf("validate schedule calendar %q: %w", calendar, err)
+			}
 		}
 	}
 	config := persistedConfigFrom(options.start)
@@ -143,6 +160,15 @@ func parseSchedule(args []string) (scheduleOptions, error) {
 		if value != "" && !validSystemdDuration(value) {
 			return options, fmt.Errorf("invalid %s duration %q", flag, value)
 		}
+		if value != "" {
+			duration, err := parsePortableDuration(value)
+			if err != nil {
+				return options, fmt.Errorf("invalid portable %s duration %q", flag, value)
+			}
+			if flag == "--interval" && duration < time.Minute {
+				return options, errors.New("--interval must be at least 1min on portable schedules")
+			}
+		}
 	}
 	if options.expression != "" {
 		calendar, err := cronToOnCalendar(options.expression)
@@ -159,6 +185,11 @@ func parseSchedule(args []string) (scheduleOptions, error) {
 	start.cronRestart = ""
 	if start.timezone != "" && options.expression == "" {
 		return options, errors.New("--timezone requires --cron")
+	}
+	if start.timezone != "" {
+		if _, err := loadScheduleLocation(start.timezone); err != nil {
+			return options, err
+		}
 	}
 	if start.instances > 0 {
 		return options, errors.New("scheduled tasks cannot use --instances")

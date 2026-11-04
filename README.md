@@ -350,6 +350,12 @@ spm schedule --name cache-sync \
 
 `--persistent` catches up a missed calendar run after downtime. `--randomized-delay` helps avoid many hosts starting the same job together. Use `--timezone Asia/Singapore` with `--cron` when the server's local timezone is not appropriate.
 
+Scheduling is available on Linux, Windows, and macOS. Portable cron expressions
+use five fields and support numbers, `*`, lists, ranges, and steps. Interval
+schedules have a minimum duration of one minute. Windows uses Task Scheduler;
+macOS uses launchd; both invoke a short-lived spm runner and do not require a
+permanent scheduling daemon.
+
 ### Periodically restart a long-running service
 
 This is different from a scheduled job:
@@ -433,6 +439,13 @@ name = "frontend"
 command = ["./frontend"]
 requires = ["database"]
 after = ["database"]
+
+[[services]]
+name = "backup"
+command = ["./backup", "--incremental"]
+schedule = "0 2 * * *"
+timezone = "Asia/Singapore"
+persistent = true
 ```
 
 Common values apply everywhere. `[services.linux]`, `[services.windows]`, and
@@ -798,10 +811,13 @@ spm is available under the [MIT License](LICENSE).
   Startup folder and the Service Control Manager. macOS uses launchd.
 - Windows currently supports the core lifecycle, logs, restart policies,
   readiness checks, user/system scopes, and selectable system accounts.
-  Scheduling, health timers, instances, resource limits, and systemd unit
-  import remain Linux-specific. macOS supports the common lifecycle, logs,
+  Health timers, instances, resource limits, and systemd unit import remain
+  Linux-specific. Scheduled system tasks on Windows currently use SYSTEM,
+  LocalService, or NetworkService. macOS supports the common lifecycle, logs,
   declarations, restart policies, readiness checks, dependencies, and both
   LaunchAgent and LaunchDaemon scopes.
+- Cross-platform schedules use native activation plus shared SPM semantics;
+  see [the scheduling design](docs/cross-platform-scheduling.md).
 - PM2 cluster-mode socket sharing, watch mode, deployment, and remote management are not implemented.
 - `--instances` provides fork-mode instances, not PM2 cluster mode.
 - spm does not install language runtimes or runtime managers.

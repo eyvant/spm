@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type serviceDeclaration struct {
@@ -79,9 +80,26 @@ func validateTimerDeclaration(service serviceDeclaration) error {
 		if value != "" && !validSystemdDuration(value) {
 			return fmt.Errorf("invalid %s duration %q", field, value)
 		}
+		if value != "" {
+			duration, err := parsePortableDuration(value)
+			if err != nil {
+				return fmt.Errorf("invalid portable %s duration %q", field, value)
+			}
+			if field == "timer_interval" && duration < time.Minute {
+				return errors.New("timer_interval must be at least 1min on portable schedules")
+			}
+		}
 	}
 	if service.Persistent && service.Schedule == "" {
 		return errors.New("persistent requires schedule")
+	}
+	if service.Timezone != "" {
+		if service.Schedule == "" {
+			return errors.New("timezone requires schedule")
+		}
+		if _, err := loadScheduleLocation(service.Timezone); err != nil {
+			return err
+		}
 	}
 	if service.TimerRandomDelay != "" && !service.hasSchedule() {
 		return errors.New("timer_randomized_delay requires schedule, timer_on_boot, or timer_interval")

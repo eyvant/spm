@@ -21,21 +21,28 @@ import (
 const darwinConfigVersion = 1
 
 type darwinServiceConfig struct {
-	Version     int      `json:"version"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Cwd         string   `json:"cwd"`
-	Command     []string `json:"command"`
-	Env         []string `json:"env,omitempty"`
-	EnvFile     string   `json:"env_file,omitempty"`
-	Restart     string   `json:"restart"`
-	RestartSec  string   `json:"restart_sec"`
-	Enabled     bool     `json:"enabled"`
-	RunAs       string   `json:"run_as,omitempty"`
-	Group       string   `json:"group,omitempty"`
-	After       []string `json:"after,omitempty"`
-	Wants       []string `json:"wants,omitempty"`
-	Requires    []string `json:"requires,omitempty"`
+	Version          int      `json:"version"`
+	Name             string   `json:"name"`
+	Description      string   `json:"description"`
+	Cwd              string   `json:"cwd"`
+	Command          []string `json:"command"`
+	Env              []string `json:"env,omitempty"`
+	EnvFile          string   `json:"env_file,omitempty"`
+	Restart          string   `json:"restart"`
+	RestartSec       string   `json:"restart_sec"`
+	Enabled          bool     `json:"enabled"`
+	RunAs            string   `json:"run_as,omitempty"`
+	Group            string   `json:"group,omitempty"`
+	After            []string `json:"after,omitempty"`
+	Wants            []string `json:"wants,omitempty"`
+	Requires         []string `json:"requires,omitempty"`
+	Mode             string   `json:"mode,omitempty"`
+	Schedule         string   `json:"schedule,omitempty"`
+	Timezone         string   `json:"timezone,omitempty"`
+	TimerOnBoot      string   `json:"timer_on_boot,omitempty"`
+	TimerInterval    string   `json:"timer_interval,omitempty"`
+	TimerRandomDelay string   `json:"timer_randomized_delay,omitempty"`
+	Persistent       bool     `json:"persistent,omitempty"`
 }
 
 type darwinBackend struct {
@@ -91,6 +98,7 @@ Usage:
 Core commands:
   spm start [options] <script|-- command>
   spm start <name>
+  spm schedule [options] <script|-- command>
   spm list [--json] [--watch[=DURATION]]
   spm status|show|describe <name>
   spm logs [--lines N] [--follow] [--grep PATTERN] [name...|all]
@@ -113,6 +121,8 @@ func printPlatformCommandHelp(w io.Writer, command string) bool {
 	switch command {
 	case "start":
 		fmt.Fprintln(w, "Usage:\n  spm start [options] <script> [arguments]\n  spm start [options] -- <command> [arguments]\n  spm start <name>")
+	case "schedule":
+		fmt.Fprintln(w, "Usage:\n  spm schedule [start options] [--cron EXPR|--interval DURATION|--on-boot DURATION] <script|-- command>")
 	case "list", "ls", "status-all":
 		fmt.Fprintln(w, "Usage:\n  spm list [--json] [--watch[=DURATION]]")
 	case "logs":
@@ -141,6 +151,8 @@ func (b *darwinBackend) run(args []string) error {
 	switch args[0] {
 	case "start":
 		return b.start(args[1:])
+	case "schedule":
+		return b.schedule(args[1:])
 	case "run":
 		name, err := oneName(args[1:])
 		if err != nil {
@@ -189,7 +201,7 @@ func (b *darwinBackend) run(args []string) error {
 	case "startup":
 		fmt.Fprintln(b.stdout, "Enabled macOS services already start through launchd; no additional startup setup is required.")
 		return nil
-	case "schedule", "signal", "kill", "scale", "reload", "set", "unset", "clone", "history", "rollback", "security", "export", "health", "import", "edit":
+	case "signal", "kill", "scale", "reload", "set", "unset", "clone", "history", "rollback", "security", "export", "health", "import", "edit":
 		return fmt.Errorf("%s is not supported by the macOS backend yet", args[0])
 	default:
 		return fmt.Errorf("unknown command %q; run spm help", args[0])
@@ -303,6 +315,8 @@ func (b *darwinBackend) start(args []string) error {
 	}
 	if b.exists(options.name) {
 		_ = b.bootout(options.name)
+		_ = os.Remove(b.bootPlistPath(options.name))
+		_ = os.Remove(b.serviceBootPlistPath(options.name))
 	}
 	config := darwinServiceConfig{Version: darwinConfigVersion, Name: options.name, Description: options.description, Cwd: options.cwd, Command: append([]string(nil), options.command...), Env: append([]string(nil), options.env...), EnvFile: options.envFile, Restart: options.restart, RestartSec: options.restartSec, Enabled: options.enable, RunAs: runAs, Group: group, After: append([]string(nil), options.after...), Wants: append([]string(nil), options.wants...), Requires: append([]string(nil), options.requires...)}
 	if err := b.writeConfig(config); err != nil {
@@ -354,6 +368,9 @@ func rejectDarwinStartOptions(o startOptions) error {
 }
 
 func (b *darwinBackend) writePlist(config darwinServiceConfig) error {
+	if config.Mode == "schedule" {
+		return b.writeSchedulePlists(config)
+	}
 	if err := b.ensureDirectories(config.Name); err != nil {
 		return err
 	}
@@ -483,6 +500,9 @@ func (b *darwinBackend) startManagedStack(name string, stack map[string]bool) er
 	if err != nil {
 		return err
 	}
+	if config.Mode == "schedule" {
+		return b.runScheduledTask(name, true)
+	}
 	for _, dependency := range config.Requires {
 		if !b.exists(dependency) {
 			return fmt.Errorf("required service %q is not managed by spm", dependency)
@@ -521,11 +541,18 @@ func (b *darwinBackend) startManagedStack(name string, stack map[string]bool) er
 }
 
 func (b *darwinBackend) bootout(name string) error {
-	if !b.loaded(name) {
-		return nil
+	config, _ := b.readConfig(name)
+	labels := []string{b.target(name)}
+	if config.Mode == "schedule" && config.TimerOnBoot != "" {
+		labels = append(labels, b.domain()+"/"+b.bootLabel(name))
 	}
-	if _, err := b.launchctl("bootout", b.target(name)); err != nil {
-		return fmt.Errorf("stop %s: %w", name, err)
+	for _, label := range labels {
+		if _, err := b.launchctl("print", label); err != nil {
+			continue
+		}
+		if _, err := b.launchctl("bootout", label); err != nil {
+			return fmt.Errorf("stop %s: %w", name, err)
+		}
 	}
 	return nil
 }
@@ -581,6 +608,25 @@ func (b *darwinBackend) controlMany(action string, selectors []string) error {
 	}
 	var errs []error
 	for _, name := range names {
+		config, _ := b.readConfig(name)
+		if config.Mode == "schedule" {
+			switch action {
+			case "stop":
+				err = b.bootout(name)
+			case "restart":
+				err = b.runScheduledTask(name, true)
+			case "enable":
+				err = b.setScheduledEnabled(config, true)
+			case "disable":
+				err = b.setScheduledEnabled(config, false)
+			}
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			} else {
+				fmt.Fprintf(b.stdout, "%s %s\n", name, actionPastTense(action))
+			}
+			continue
+		}
 		switch action {
 		case "stop":
 			err = b.bootout(name)
@@ -608,6 +654,9 @@ func (b *darwinBackend) setEnabled(name string, enabled bool) error {
 	config, err := b.readConfig(name)
 	if err != nil {
 		return err
+	}
+	if config.Mode == "schedule" {
+		return b.setScheduledEnabled(config, enabled)
 	}
 	_ = b.bootout(name)
 	config.Enabled = enabled
@@ -645,6 +694,19 @@ func (b *darwinBackend) list(options listOptions) error {
 		if err != nil {
 			continue
 		}
+		if config.Mode == "schedule" {
+			status := "disabled"
+			active := "inactive"
+			if config.Enabled {
+				status, active = "waiting", "active"
+			}
+			unit := b.label(name)
+			if config.Schedule == "" && config.TimerInterval == "" {
+				unit = b.bootLabel(name)
+			}
+			rows = append(rows, listRow{Name: name, Unit: unit, Status: status, ActiveState: active, SubState: status, Health: "-", Enabled: map[bool]string{true: "enabled", false: "disabled"}[config.Enabled]})
+			continue
+		}
 		state := b.readState(name)
 		pid, _ := strconv.Atoi(state.pid)
 		restarts, _ := strconv.Atoi(state.restarts)
@@ -657,6 +719,18 @@ func (b *darwinBackend) status(name string) error {
 	config, err := b.readConfig(name)
 	if err != nil {
 		return fmt.Errorf("service %q is not managed by spm", name)
+	}
+	if config.Mode == "schedule" {
+		state := readPortableScheduleState(filepath.Join(b.scheduleStateDir(name), "schedule-state.json"))
+		status := "disabled"
+		if config.Enabled {
+			status = "waiting"
+		}
+		w := tabwriter.NewWriter(b.stdout, 0, 4, 2, ' ', 0)
+		for _, row := range [][2]string{{"status", status}, {"name", name}, {"scope", map[bool]string{true: "system", false: "user"}[b.system]}, {"enabled", strconv.FormatBool(config.Enabled)}, {"schedule", valueOr(config.Schedule, "-")}, {"interval", valueOr(config.TimerInterval, "-")}, {"on boot", valueOr(config.TimerOnBoot, "-")}, {"timezone", valueOr(config.Timezone, "local")}, {"last scheduled", formatScheduleTime(state.LastScheduledAt)}, {"last finished", formatScheduleTime(state.LastFinishedAt)}, {"last exit code", scheduleExitCode(state.LastExitCode)}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"log", b.logPath(name)}} {
+			fmt.Fprintf(w, "%s\t%s\n", row[0], row[1])
+		}
+		return w.Flush()
 	}
 	state := b.readState(name)
 	scope := "user"
@@ -799,6 +873,10 @@ func (b *darwinBackend) removeMany(args []string) error {
 			errs = append(errs, err)
 			continue
 		}
+		if err := os.Remove(b.bootPlistPath(name)); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, err)
+			continue
+		}
 		if err := os.RemoveAll(b.serviceDir(name)); err != nil {
 			errs = append(errs, err)
 			continue
@@ -847,12 +925,23 @@ func (b *darwinBackend) apply(args []string) error {
 	}
 	var errs []error
 	for _, service := range services {
+		var applyErr error
 		if service.hasSchedule() {
-			errs = append(errs, fmt.Errorf("%s: scheduled declarations are not supported on macOS yet", service.Name))
-			continue
+			var scheduleArgs []string
+			for _, option := range [][2]string{{"--cron", service.Schedule}, {"--on-boot", service.TimerOnBoot}, {"--interval", service.TimerInterval}, {"--randomized-delay", service.TimerRandomDelay}} {
+				if option[1] != "" {
+					scheduleArgs = append(scheduleArgs, option[0], option[1])
+				}
+			}
+			if service.Persistent {
+				scheduleArgs = append(scheduleArgs, "--persistent")
+			}
+			applyErr = b.schedule(append(scheduleArgs, service.startArgs(b.exists(service.Name), b.system)...))
+		} else {
+			applyErr = b.start(service.startArgs(b.exists(service.Name), b.system))
 		}
-		if err := b.start(service.startArgs(b.exists(service.Name), b.system)); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", service.Name, err))
+		if applyErr != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", service.Name, applyErr))
 		}
 	}
 	return errors.Join(errs...)
@@ -879,9 +968,6 @@ func (b *darwinBackend) inspectDeclaration(action string, args []string) error {
 }
 
 func (b *darwinBackend) prepareDeclaration(service serviceDeclaration) (darwinServiceConfig, error) {
-	if service.hasSchedule() {
-		return darwinServiceConfig{}, errors.New("scheduled declarations are not supported on macOS yet")
-	}
 	options, err := parseStart(service.startArgs(b.exists(service.Name), b.system))
 	if err != nil {
 		return darwinServiceConfig{}, err
@@ -891,13 +977,27 @@ func (b *darwinBackend) prepareDeclaration(service serviceDeclaration) (darwinSe
 	}
 	runAs, group := options.runAsUser, options.runAsGroup
 	options.runAsUser, options.runAsGroup = "", ""
+	timezone := options.timezone
+	if service.hasSchedule() {
+		options.timezone = ""
+	}
 	if err := rejectDarwinStartOptions(options); err != nil {
 		return darwinServiceConfig{}, err
 	}
 	if err := options.prepare(); err != nil {
 		return darwinServiceConfig{}, err
 	}
-	return darwinServiceConfig{Version: darwinConfigVersion, Name: options.name, Description: options.description, Cwd: options.cwd, Command: append([]string(nil), options.command...), Env: append([]string(nil), options.env...), EnvFile: options.envFile, Restart: options.restart, RestartSec: options.restartSec, Enabled: options.enable, RunAs: runAs, Group: group, After: append([]string(nil), options.after...), Wants: append([]string(nil), options.wants...), Requires: append([]string(nil), options.requires...)}, nil
+	config := darwinServiceConfig{Version: darwinConfigVersion, Name: options.name, Description: options.description, Cwd: options.cwd, Command: append([]string(nil), options.command...), Env: append([]string(nil), options.env...), EnvFile: options.envFile, Restart: options.restart, RestartSec: options.restartSec, Enabled: options.enable, RunAs: runAs, Group: group, After: append([]string(nil), options.after...), Wants: append([]string(nil), options.wants...), Requires: append([]string(nil), options.requires...)}
+	if service.hasSchedule() {
+		config.Mode, config.Restart = "schedule", "no"
+		config.Schedule, config.Timezone, config.TimerOnBoot = service.Schedule, timezone, service.TimerOnBoot
+		config.TimerInterval, config.TimerRandomDelay, config.Persistent = service.TimerInterval, service.TimerRandomDelay, service.Persistent
+		record := portableScheduleRecord{Version: 1, Name: config.Name, Command: config.Command, Cwd: config.Cwd, Schedule: config.Schedule, Timezone: config.Timezone, TimerOnBoot: config.TimerOnBoot, TimerInterval: config.TimerInterval, TimerRandomDelay: config.TimerRandomDelay, Persistent: config.Persistent, CreatedAt: time.Now()}
+		if err := validatePortableSchedule(record); err != nil {
+			return darwinServiceConfig{}, err
+		}
+	}
+	return config, nil
 }
 
 func (b *darwinBackend) printDeclarationPlan(services []serviceDeclaration, detailed bool) error {

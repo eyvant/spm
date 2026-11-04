@@ -7,14 +7,17 @@ import (
 
 func TestCronToOnCalendar(t *testing.T) {
 	tests := map[string]string{
-		"*/30 * * * *": "*-*-* *:00/30:00",
-		"0 3 * * *":    "*-*-* 03:00:00",
-		"15 4 1 * *":   "*-*-01 04:15:00",
-		"0 9 * * 1-5":  "Mon..Fri *-*-* 09:00:00",
-		"0 9 * * 0-1":  "Sun,Mon *-*-* 09:00:00",
-		"0 9 * * 0-5":  "Sun,Mon..Fri *-*-* 09:00:00",
-		"0 9 * * 0-6":  "Sun,Mon..Sat *-*-* 09:00:00",
-		"0 9 * * 0-7":  "*-*-* 09:00:00",
+		"*/30 * * * *":   "*-*-* *:00/30:00",
+		"0 3 * * *":      "*-*-* 03:00:00",
+		"15 4 1 * *":     "*-*-01 04:15:00",
+		"0 9 * * 1-5":    "Mon..Fri *-*-* 09:00:00",
+		"0 9 * * 0-1":    "Sun,Mon *-*-* 09:00:00",
+		"0 9 * * 0-5":    "Sun,Mon..Fri *-*-* 09:00:00",
+		"0 9 * * 0-6":    "Sun,Mon..Sat *-*-* 09:00:00",
+		"0 9 * * 0-7":    "*-*-* 09:00:00",
+		"0 9 * * */2":    "Sun,Tue,Thu,Sat *-*-* 09:00:00",
+		"0 9 1 * 1":      "*-*-01 09:00:00\nOnCalendar=Mon *-*-* 09:00:00",
+		"0 9 1-10/3 * *": "*-*-01..10/3 09:00:00",
 	}
 	for expression, want := range tests {
 		got, err := cronToOnCalendar(expression)
@@ -28,7 +31,7 @@ func TestCronToOnCalendar(t *testing.T) {
 }
 
 func TestCronToOnCalendarRejectsUnsupportedExpressions(t *testing.T) {
-	for _, expression := range []string{"* * *", "60 * * * *", "0 0 1 * 1", "0 0 * * */2", "* * * * *\n"} {
+	for _, expression := range []string{"* * *", "60 * * * *", "0 0 * * 1-/2", "* * * * *\n"} {
 		if _, err := cronToOnCalendar(expression); err == nil {
 			t.Errorf("cronToOnCalendar(%q) unexpectedly succeeded", expression)
 		}

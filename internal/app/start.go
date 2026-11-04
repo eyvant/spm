@@ -315,8 +315,10 @@ func (a *application) installPrepared(options startOptions, savedConfig persiste
 	}
 	var cronService, cronTimer string
 	if options.cronRestart != "" {
-		if _, err := a.runner.Run("systemd-analyze", "calendar", options.cronCalendar); err != nil {
-			return fmt.Errorf("validate cron restart calendar %q: %w", options.cronCalendar, err)
+		for _, calendar := range strings.Split(options.cronCalendar, "\nOnCalendar=") {
+			if _, err := a.runner.Run("systemd-analyze", "calendar", calendar); err != nil {
+				return fmt.Errorf("validate cron restart calendar %q: %w", calendar, err)
+			}
 		}
 		systemctl, resolveErr := resolveExecutable("systemctl")
 		if resolveErr != nil {
@@ -1179,7 +1181,11 @@ func withTimezone(calendar, timezone string) string {
 	if calendar == "" || timezone == "" {
 		return calendar
 	}
-	return calendar + " " + timezone
+	parts := strings.Split(calendar, "\nOnCalendar=")
+	for index := range parts {
+		parts[index] += " " + timezone
+	}
+	return strings.Join(parts, "\nOnCalendar=")
 }
 
 func hasProperty(properties []string, key string) bool {

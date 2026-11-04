@@ -10,10 +10,14 @@ MAIN=$PREFIX-main
 DEPENDENCY=$PREFIX-dependency
 DEPENDENT=$PREFIX-dependent
 DECLARED=$PREFIX-declared
+SCHEDULE=$PREFIX-scheduled
+SCHEDULE_DECLARED=$PREFIX-scheduled-declared
 CRASHING=$PREFIX-crashing
 MARKER="SPM_MACOS_READY_$PREFIX"
 TOML=${RUNNER_TEMP:-/tmp}/$PREFIX.toml
 CRASH_LOG=${RUNNER_TEMP:-/tmp}/$PREFIX-restarts.log
+SCHEDULE_MARKER=${RUNNER_TEMP:-/tmp}/$PREFIX-schedule-marker.log
+SCHEDULE_TOML=${RUNNER_TEMP:-/tmp}/$PREFIX-schedule.toml
 
 if [[ $SCOPE == system ]]; then
   command_spm() { sudo "$SPM" --system "$@"; }
@@ -37,12 +41,13 @@ diagnose() {
 cleanup() {
   trap - ERR
   set +e
-  for name in "$CRASHING" "$DEPENDENT" "$DEPENDENCY" "$DECLARED" "$MAIN"; do
+  for name in "$CRASHING" "$SCHEDULE_DECLARED" "$SCHEDULE" "$DEPENDENT" "$DEPENDENCY" "$DECLARED" "$MAIN"; do
     command_spm stop "$name" >/dev/null 2>&1
     command_spm delete --yes "$name" >/dev/null 2>&1
   done
   rm -f "$TOML"
   rm -f "$CRASH_LOG"
+  rm -f "$SCHEDULE_MARKER" "$SCHEDULE_TOML"
 }
 trap diagnose ERR
 trap cleanup EXIT
@@ -133,8 +138,58 @@ command_spm apply "$TOML"
 wait_running "$DECLARED"
 command_spm diff "$TOML" | grep -F $'unchanged\t'"$DECLARED"
 
+echo "==> macOS $SCOPE native scheduling, portable cron, state, and lifecycle"
+schedule_args=(schedule --name "$SCHEDULE" --cron '* * * * *' --timezone UTC --persistent --randomized-delay 1s --cwd /tmp)
+if [[ $SCOPE == system ]]; then
+  schedule_args+=(--user root --group wheel)
+fi
+schedule_args+=(-- /bin/sh -c "date -u +%FT%TZ >> '$SCHEDULE_MARKER'")
+command_spm "${schedule_args[@]}"
+SCHEDULE_PLIST=$PLIST_DIR/com.eyvant.spm.$SCHEDULE.plist
+test -f "$SCHEDULE_PLIST"
+grep -F '<key>StartInterval</key>' "$SCHEDULE_PLIST"
+grep -F '__scheduled-run' "$SCHEDULE_PLIST"
+command_spm native launchd print "$SCHEDULE" | grep -F "com.eyvant.spm.$SCHEDULE"
+for _ in {1..100}; do
+  [[ -s $SCHEDULE_MARKER ]] && break
+  sleep 1
+done
+[[ -s $SCHEDULE_MARKER ]]
+command_spm status "$SCHEDULE" | grep -Eq '^status[[:space:]]+waiting$'
+command_spm status "$SCHEDULE" | grep -Eq '^last exit code[[:space:]]+0$'
+LINES_BEFORE=$(wc -l <"$SCHEDULE_MARKER")
+command_spm run "$SCHEDULE"
+LINES_AFTER=$(wc -l <"$SCHEDULE_MARKER")
+[[ $LINES_AFTER -gt $LINES_BEFORE ]]
+command_spm disable "$SCHEDULE"
+test ! -e "$SCHEDULE_PLIST"
+command_spm enable "$SCHEDULE"
+test -f "$SCHEDULE_PLIST"
+
+echo "==> macOS $SCOPE declarative scheduled task"
+cat >"$SCHEDULE_TOML" <<EOF
+schema = 1
+[[services]]
+name = "$SCHEDULE_DECLARED"
+command = ["/usr/bin/true"]
+schedule = "*/5 9-17/2 1 * 1-5/2"
+timezone = "Asia/Singapore"
+persistent = true
+timer_randomized_delay = "1s"
+enable = false
+[services.macos]
+description = "macOS declarative schedule"
+EOF
+command_spm validate "$SCHEDULE_TOML"
+command_spm apply --dry-run "$SCHEDULE_TOML" | grep -F $'create\t'"$SCHEDULE_DECLARED"
+command_spm apply "$SCHEDULE_TOML"
+test ! -e "$PLIST_DIR/com.eyvant.spm.$SCHEDULE_DECLARED.plist"
+command_spm cat "$SCHEDULE_DECLARED" | grep -F '__scheduled-run'
+command_spm diff "$SCHEDULE_TOML" | grep -F $'unchanged\t'"$SCHEDULE_DECLARED"
+
 cleanup
-for name in "$MAIN" "$DEPENDENCY" "$DEPENDENT" "$DECLARED" "$CRASHING"; do
+for name in "$MAIN" "$DEPENDENCY" "$DEPENDENT" "$DECLARED" "$SCHEDULE" "$SCHEDULE_DECLARED" "$CRASHING"; do
   test ! -e "$PLIST_DIR/com.eyvant.spm.$name.plist"
+  test ! -e "$PLIST_DIR/com.eyvant.spm.$name.boot.plist"
 done
 echo "spm macOS $SCOPE integration passed"

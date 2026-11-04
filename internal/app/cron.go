@@ -7,41 +7,55 @@ import (
 )
 
 func cronToOnCalendar(expression string) (string, error) {
+	calendars, err := cronToOnCalendars(expression)
+	if err != nil {
+		return "", err
+	}
+	return strings.Join(calendars, "\nOnCalendar="), nil
+}
+
+func cronToOnCalendars(expression string) ([]string, error) {
 	if strings.ContainsAny(expression, "\r\n") {
-		return "", fmt.Errorf("expression cannot contain a newline")
+		return nil, fmt.Errorf("expression cannot contain a newline")
 	}
 	fields := strings.Fields(expression)
 	if len(fields) != 5 {
-		return "", fmt.Errorf("expected 5 fields, got %d", len(fields))
+		return nil, fmt.Errorf("expected 5 fields, got %d", len(fields))
+	}
+	if _, err := parseCronExpression(expression); err != nil {
+		return nil, err
 	}
 	minute, err := convertCronField(fields[0], 0, 59, 0)
 	if err != nil {
-		return "", fmt.Errorf("minute: %w", err)
+		return nil, fmt.Errorf("minute: %w", err)
 	}
 	hour, err := convertCronField(fields[1], 0, 23, 0)
 	if err != nil {
-		return "", fmt.Errorf("hour: %w", err)
+		return nil, fmt.Errorf("hour: %w", err)
 	}
 	day, err := convertCronField(fields[2], 1, 31, 1)
 	if err != nil {
-		return "", fmt.Errorf("day of month: %w", err)
+		return nil, fmt.Errorf("day of month: %w", err)
 	}
 	month, err := convertCronField(fields[3], 1, 12, 1)
 	if err != nil {
-		return "", fmt.Errorf("month: %w", err)
+		return nil, fmt.Errorf("month: %w", err)
 	}
 	weekday, err := convertCronWeekday(fields[4])
 	if err != nil {
-		return "", fmt.Errorf("day of week: %w", err)
+		return nil, fmt.Errorf("day of week: %w", err)
 	}
-	if fields[2] != "*" && weekday != "*" {
-		return "", fmt.Errorf("day of month and day of week cannot both be restricted")
+	render := func(renderedDay, renderedWeekday string) string {
+		prefix := ""
+		if renderedWeekday != "*" {
+			prefix = renderedWeekday + " "
+		}
+		return fmt.Sprintf("%s*-%s-%s %s:%s:00", prefix, month, renderedDay, hour, minute)
 	}
-	prefix := ""
-	if weekday != "*" {
-		prefix = weekday + " "
+	if fields[2] != "*" && fields[4] != "*" {
+		return []string{render(day, "*"), render("*", weekday)}, nil
 	}
-	return fmt.Sprintf("%s*-%s-%s %s:%s:00", prefix, month, day, hour, minute), nil
+	return []string{render(day, weekday)}, nil
 }
 
 func convertCronField(field string, minimum, maximum, stepStart int) (string, error) {
@@ -68,8 +82,20 @@ func convertCronPart(part string, minimum, maximum, stepStart int) (string, erro
 		}
 		return fmt.Sprintf("%02d/%d", stepStart, step), nil
 	}
-	if strings.Count(part, "-") == 1 {
-		bounds := strings.SplitN(part, "-", 2)
+	base, stepText, hasStep := strings.Cut(part, "/")
+	stepSuffix := ""
+	if hasStep {
+		if strings.Contains(stepText, "/") {
+			return "", fmt.Errorf("invalid step %q", part)
+		}
+		step, err := strconv.Atoi(stepText)
+		if err != nil || step < 1 || step > maximum-minimum+1 {
+			return "", fmt.Errorf("invalid step %q", part)
+		}
+		stepSuffix = "/" + strconv.Itoa(step)
+	}
+	if strings.Count(base, "-") == 1 {
+		bounds := strings.SplitN(base, "-", 2)
 		start, err := parseCronNumber(bounds[0], minimum, maximum)
 		if err != nil {
 			return "", err
@@ -79,9 +105,12 @@ func convertCronPart(part string, minimum, maximum, stepStart int) (string, erro
 			return "", err
 		}
 		if start > end {
-			return "", fmt.Errorf("range %q starts after it ends", part)
+			return "", fmt.Errorf("range %q starts after it ends", base)
 		}
-		return fmt.Sprintf("%02d..%02d", start, end), nil
+		return fmt.Sprintf("%02d..%02d%s", start, end, stepSuffix), nil
+	}
+	if hasStep {
+		return "", fmt.Errorf("step %q requires * or a range", part)
 	}
 	value, err := parseCronNumber(part, minimum, maximum)
 	if err != nil {
@@ -107,7 +136,16 @@ func convertCronWeekday(field string) (string, error) {
 	converted := make([]string, 0, len(parts))
 	for _, part := range parts {
 		if strings.Contains(part, "/") {
-			return "", fmt.Errorf("weekday steps are not supported")
+			parsed, err := parsePortableCronField(part, 0, 7, true)
+			if err != nil {
+				return "", err
+			}
+			for value, set := range parsed.values {
+				if set {
+					converted = append(converted, names[value])
+				}
+			}
+			continue
 		}
 		if strings.Count(part, "-") == 1 {
 			bounds := strings.SplitN(part, "-", 2)

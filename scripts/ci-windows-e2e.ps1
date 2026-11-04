@@ -17,15 +17,19 @@ $main = "$prefix-$($Scope.ToLowerInvariant())-main"
 $dependency = "$prefix-$($Scope.ToLowerInvariant())-dependency"
 $dependent = "$prefix-$($Scope.ToLowerInvariant())-dependent"
 $declared = "$prefix-$($Scope.ToLowerInvariant())-declared"
+$scheduled = "$prefix-$($Scope.ToLowerInvariant())-scheduled"
+$scheduledDeclared = "$prefix-$($Scope.ToLowerInvariant())-scheduled-declared"
 $crashing = "$prefix-user-crashing"
-$names = @($main, $dependency, $dependent, $declared, $crashing)
+$names = @($main, $dependency, $dependent, $declared, $scheduled, $scheduledDeclared, $crashing)
 $oldData = [Environment]::GetEnvironmentVariable('SPM_WINDOWS_DATA_DIR', 'Process')
 $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { Join-Path $repo '.ci-tmp' }
 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
 $data = if ($system) { Join-Path $env:ProgramData "$prefix-spm-data" } else { Join-Path $tempRoot "$prefix-user-data" }
 $toml = Join-Path $tempRoot "$prefix-$($Scope.ToLowerInvariant()).toml"
+$scheduleToml = Join-Path $tempRoot "$prefix-$($Scope.ToLowerInvariant())-schedule.toml"
 $workload = Join-Path $repo 'scripts\spm-test-service.ps1'
 $workloadDir = $null
+$scheduleMarker = $null
 
 if ($system) {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -41,6 +45,9 @@ if ($system) {
     $systemSpm = Join-Path $workloadDir 'spm-ci.exe'
     Copy-Item -LiteralPath $Spm -Destination $systemSpm -Force
     $Spm = $systemSpm
+    $scheduleMarker = Join-Path $workloadDir 'schedule-marker.txt'
+} else {
+    $scheduleMarker = Join-Path $tempRoot "$prefix-schedule-marker.txt"
 }
 
 function Invoke-Spm {
@@ -87,6 +94,15 @@ function Wait-Log([string]$Name, [string]$Pattern) {
         Start-Sleep -Milliseconds 250
     }
     throw "$Name did not log $Pattern."
+}
+
+function Wait-File([string]$Path, [int]$TimeoutSeconds = 90) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (Test-Path -LiteralPath $Path) { return }
+        Start-Sleep -Seconds 1
+    }
+    throw "Timed out waiting for $Path"
 }
 
 function Start-Workload([string]$Name, [string]$Account = '') {
@@ -166,6 +182,67 @@ $accountLine
     $diff = (Invoke-Spm @('diff', $toml) -Capture) -join "`n"
     if ($diff -notmatch "unchanged`t$([regex]::Escape($declared))") { throw "Unexpected diff: $diff" }
 
+    Write-Host "==> $Scope native scheduling, portable cron, state, and lifecycle"
+    Remove-Item -LiteralPath $scheduleMarker -Force -ErrorAction SilentlyContinue
+    $powershell = (Get-Command powershell.exe).Source
+    $scheduleArguments = @(
+        'schedule', '--name', $scheduled, '--cron', '* * * * *', '--timezone', 'UTC',
+        '--persistent', '--randomized-delay', '1s', '--cwd', (Split-Path $scheduleMarker)
+    )
+    if ($system) { $scheduleArguments += @('--user', 'LocalService') }
+    $scheduleArguments += @(
+        '--',
+        $powershell, '-NoProfile', '-NonInteractive', '-Command',
+        "Add-Content -LiteralPath '$($scheduleMarker.Replace("'", "''"))' -Value ([DateTime]::UtcNow.ToString('O'))"
+    )
+    Invoke-Spm $scheduleArguments | Out-Null
+    $taskName = "spm-$scheduled-schedule"
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    if ($task.State -eq 'Disabled') { throw "$taskName was unexpectedly disabled" }
+    $taskXml = Export-ScheduledTask -TaskName $taskName
+    if ($taskXml -notmatch '__scheduled-run' -or $taskXml -notmatch '<Interval>PT1M</Interval>') {
+        throw "Unexpected schedule task XML: $taskXml"
+    }
+    Wait-File $scheduleMarker 100
+    $scheduleStatus = (Invoke-Spm @('status', $scheduled) -Capture) -join "`n"
+    if ($scheduleStatus -notmatch 'status\s+waiting' -or $scheduleStatus -notmatch 'last exit code\s+0') {
+        throw "Unexpected scheduled task status: $scheduleStatus"
+    }
+    $beforeManual = @(Get-Content -LiteralPath $scheduleMarker).Count
+    Invoke-Spm @('run', $scheduled) | Out-Null
+    $afterManual = @(Get-Content -LiteralPath $scheduleMarker).Count
+    if ($afterManual -le $beforeManual) { throw 'Manual scheduled run did not execute.' }
+    Invoke-Spm @('disable', $scheduled) | Out-Null
+    if ((Get-ScheduledTask -TaskName $taskName).State -ne 'Disabled') { throw 'Scheduled task was not disabled.' }
+    Invoke-Spm @('enable', $scheduled) | Out-Null
+    if ((Get-ScheduledTask -TaskName $taskName).State -eq 'Disabled') { throw 'Scheduled task was not re-enabled.' }
+
+    Write-Host "==> $Scope declarative scheduled task"
+    $escapedPowerShell = $powershell.Replace('\', '\\')
+    $escapedMarker = $scheduleMarker.Replace('\', '\\').Replace('"', '\"')
+    $scheduleAccountLine = if ($system) { 'user = "LocalService"' } else { '' }
+    $scheduleDocument = @"
+schema = 1
+[[services]]
+name = "$scheduledDeclared"
+command = ["$escapedPowerShell", "-NoProfile", "-NonInteractive", "-Command", "Add-Content -LiteralPath '$escapedMarker' -Value declared"]
+schedule = "*/5 9-17/2 1 * 1-5/2"
+timezone = "Asia/Singapore"
+persistent = true
+timer_randomized_delay = "1s"
+enable = false
+[services.windows]
+$scheduleAccountLine
+"@
+    [IO.File]::WriteAllText($scheduleToml, $scheduleDocument, [Text.UTF8Encoding]::new($false))
+    Invoke-Spm @('validate', $scheduleToml) | Out-Null
+    Invoke-Spm @('apply', $scheduleToml) | Out-Null
+    $declaredTask = Get-ScheduledTask -TaskName "spm-$scheduledDeclared-schedule" -ErrorAction Stop
+    if ($declaredTask.State -ne 'Disabled') { throw 'Declarative scheduled task should be disabled.' }
+    $scheduleDiff = (Invoke-Spm @('diff', $scheduleToml) -Capture) -join "`n"
+    if ($scheduleDiff -notmatch "unchanged`t$([regex]::Escape($scheduledDeclared))") { throw "Unexpected schedule diff: $scheduleDiff" }
+    Remove-Item -LiteralPath $scheduleToml -Force -ErrorAction SilentlyContinue
+
     if (-not $system) {
         Write-Host '==> User crash/restart policy'
         $powershell = (Get-Command powershell.exe).Source
@@ -195,6 +272,8 @@ $accountLine
     foreach ($name in $names) { try { Remove-ServiceSafe $name } catch { Write-Warning $_ } }
     [Environment]::SetEnvironmentVariable('SPM_WINDOWS_DATA_DIR', $oldData, 'Process')
     Remove-Item -LiteralPath $toml -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $scheduleToml -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $scheduleMarker -Force -ErrorAction SilentlyContinue
     if ($system) { Remove-Item -LiteralPath $workloadDir -Recurse -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $data -Recurse -Force -ErrorAction SilentlyContinue
 }

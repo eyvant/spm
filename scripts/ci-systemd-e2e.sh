@@ -17,6 +17,7 @@ SCHEDULE=${PREFIX}-schedule
 DEPENDENCY=${PREFIX}-dependency
 DEPENDENT=${PREFIX}-dependent
 DECLARED=${PREFIX}-declared
+DECLARED_SCHEDULE=${PREFIX}-declared-schedule
 CRASHING=${PREFIX}-crashing
 MARKER=/tmp/${PREFIX}-schedule-ran
 TOML=/tmp/${PREFIX}.toml
@@ -39,6 +40,8 @@ diagnose() {
     "spm-$DEPENDENCY.service" \
     "spm-$DEPENDENT.service" \
     "spm-$DECLARED.service" \
+    "spm-$DECLARED_SCHEDULE.service" \
+    "spm-$DECLARED_SCHEDULE.timer" \
     "spm-$CRASHING.service" >&2
   journalctl --no-pager -n 100 \
     -u "spm-$SERVICE.service" \
@@ -57,6 +60,7 @@ cleanup() (
   "$SPM" --system delete "$DEPENDENT" >/dev/null 2>&1
   "$SPM" --system delete "$DEPENDENCY" >/dev/null 2>&1
   "$SPM" --system delete "$DECLARED" >/dev/null 2>&1
+  "$SPM" --system delete "$DECLARED_SCHEDULE" >/dev/null 2>&1
   "$SPM" --system delete "$CRASHING" >/dev/null 2>&1
   rm -f "/etc/systemd/system/spm-$CRASHING.service.d/crash.conf"
   rmdir "/etc/systemd/system/spm-$CRASHING.service.d" 2>/dev/null || true
@@ -131,11 +135,12 @@ test "$PID_AFTER" != 0
 "$SPM" --system schedule \
   --name "$SCHEDULE" \
   --cwd /tmp \
-  --cron "*/30 * * * *" \
+  --cron "*/15 * 1 * 1-5" \
   --persistent \
   --run-now \
   -- /usr/bin/touch "$MARKER"
 test -e "$MARKER"
+grep -c '^OnCalendar=' "/etc/systemd/system/spm-$SCHEDULE.timer" | grep -Fx 2
 
 "$SPM" --system start --name "$DEPENDENCY" --cwd /tmp --restart no --no-enable -- /bin/sleep 300
 "$SPM" --system stop "$DEPENDENCY"
@@ -163,12 +168,24 @@ description = "Linux declaration integration"
 command = ["cmd.exe", "/c", "exit", "0"]
 [services.macos]
 command = ["/bin/sleep", "300"]
+
+[[services]]
+name = "$DECLARED_SCHEDULE"
+command = ["/usr/bin/true"]
+schedule = "*/5 9-17/2 1 * 1-5/2"
+timezone = "UTC"
+persistent = true
+timer_randomized_delay = "1s"
+enable = false
 EOF
 "$SPM" --system validate "$TOML"
 "$SPM" --system apply --dry-run "$TOML" | grep -F $'create\t'"$DECLARED"
 "$SPM" --system apply "$TOML"
 systemctl is-active --quiet "spm-$DECLARED.service"
+test -f "/etc/systemd/system/spm-$DECLARED_SCHEDULE.timer"
+test "$(systemctl is-enabled "spm-$DECLARED_SCHEDULE.timer" || true)" = disabled
 "$SPM" --system diff "$TOML" | grep -F $'unchanged\t'"$DECLARED"
+"$SPM" --system diff "$TOML" | grep -F $'unchanged\t'"$DECLARED_SCHEDULE"
 test "$(systemctl is-active spm-$SCHEDULE.timer)" = active
 test "$(systemctl is-enabled spm-$SCHEDULE.timer)" = enabled
 
@@ -182,6 +199,8 @@ test ! -e /etc/systemd/system/spm-$SCHEDULE.service
 test ! -e /etc/systemd/system/spm-$DEPENDENCY.service
 test ! -e /etc/systemd/system/spm-$DEPENDENT.service
 test ! -e /etc/systemd/system/spm-$DECLARED.service
+test ! -e /etc/systemd/system/spm-$DECLARED_SCHEDULE.service
+test ! -e /etc/systemd/system/spm-$DECLARED_SCHEDULE.timer
 test ! -e /etc/systemd/system/spm-$CRASHING.service
 test ! -e /etc/spm/services/$SERVICE.json
 test ! -e /etc/spm/services/$SCHEDULE.json

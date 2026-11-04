@@ -28,20 +28,27 @@ import (
 const windowsStateVersion = 1
 
 type windowsServiceConfig struct {
-	Version     int      `json:"version"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Cwd         string   `json:"cwd"`
-	Command     []string `json:"command"`
-	Env         []string `json:"env,omitempty"`
-	EnvFile     string   `json:"env_file,omitempty"`
-	Restart     string   `json:"restart"`
-	RestartSec  string   `json:"restart_sec"`
-	Enabled     bool     `json:"enabled"`
-	RunAs       string   `json:"run_as,omitempty"`
-	After       []string `json:"after,omitempty"`
-	Wants       []string `json:"wants,omitempty"`
-	Requires    []string `json:"requires,omitempty"`
+	Version          int      `json:"version"`
+	Name             string   `json:"name"`
+	Description      string   `json:"description"`
+	Cwd              string   `json:"cwd"`
+	Command          []string `json:"command"`
+	Env              []string `json:"env,omitempty"`
+	EnvFile          string   `json:"env_file,omitempty"`
+	Restart          string   `json:"restart"`
+	RestartSec       string   `json:"restart_sec"`
+	Enabled          bool     `json:"enabled"`
+	RunAs            string   `json:"run_as,omitempty"`
+	After            []string `json:"after,omitempty"`
+	Wants            []string `json:"wants,omitempty"`
+	Requires         []string `json:"requires,omitempty"`
+	Mode             string   `json:"mode,omitempty"`
+	Schedule         string   `json:"schedule,omitempty"`
+	Timezone         string   `json:"timezone,omitempty"`
+	TimerOnBoot      string   `json:"timer_on_boot,omitempty"`
+	TimerInterval    string   `json:"timer_interval,omitempty"`
+	TimerRandomDelay string   `json:"timer_randomized_delay,omitempty"`
+	Persistent       bool     `json:"persistent,omitempty"`
 }
 
 type windowsServiceState struct {
@@ -142,6 +149,7 @@ Usage:
 Core commands:
   spm start [options] <script> [arguments]
   spm start [options] -- <command> [arguments]
+  spm schedule [options] <script|-- command>
   spm run <name>
   spm list [--json] [--watch[=DURATION]]
   spm status|show|describe <name>
@@ -197,6 +205,8 @@ func printPlatformCommandHelp(w io.Writer, command string) bool {
 
 Run spm with no arguments for the Windows option list.
 `)
+	case "schedule":
+		fmt.Fprintln(w, "Usage:\n  spm schedule [start options] [--cron EXPR|--interval DURATION|--on-boot DURATION] <script|-- command>")
 	case "list", "ls", "status-all":
 		fmt.Fprintln(w, "Usage:\n  spm list [--json] [--watch[=DURATION]]")
 	case "logs":
@@ -227,6 +237,8 @@ func (b *windowsBackend) run(args []string) error {
 	switch args[0] {
 	case "start":
 		return b.start(args[1:])
+	case "schedule":
+		return b.schedule(args[1:])
 	case "run":
 		name, err := oneName(args[1:])
 		if err != nil {
@@ -283,7 +295,7 @@ func (b *windowsBackend) run(args []string) error {
 			fmt.Fprintln(b.stdout, "Enabled Windows user services start automatically at logon through the user's Startup folder.")
 		}
 		return nil
-	case "schedule", "signal", "kill", "scale", "reload", "set", "unset", "clone", "history", "rollback", "security", "export", "health", "import", "edit":
+	case "signal", "kill", "scale", "reload", "set", "unset", "clone", "history", "rollback", "security", "export", "health", "import", "edit":
 		return fmt.Errorf("%s is not supported by the Windows backend yet", args[0])
 	default:
 		return fmt.Errorf("unknown command %q; run spm help", args[0])
@@ -557,12 +569,23 @@ func (b *windowsBackend) apply(args []string) error {
 	}
 	var errs []error
 	for _, service := range services {
+		var applyErr error
 		if service.hasSchedule() {
-			errs = append(errs, fmt.Errorf("%s: scheduled declarations are not supported on Windows yet", service.Name))
-			continue
+			var scheduleArgs []string
+			for _, option := range [][2]string{{"--cron", service.Schedule}, {"--on-boot", service.TimerOnBoot}, {"--interval", service.TimerInterval}, {"--randomized-delay", service.TimerRandomDelay}} {
+				if option[1] != "" {
+					scheduleArgs = append(scheduleArgs, option[0], option[1])
+				}
+			}
+			if service.Persistent {
+				scheduleArgs = append(scheduleArgs, "--persistent")
+			}
+			applyErr = b.schedule(append(scheduleArgs, service.startArgs(b.exists(service.Name), b.system)...))
+		} else {
+			applyErr = b.start(service.startArgs(b.exists(service.Name), b.system))
 		}
-		if err := b.start(service.startArgs(b.exists(service.Name), b.system)); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", service.Name, err))
+		if applyErr != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", service.Name, applyErr))
 		}
 	}
 	return errors.Join(errs...)
@@ -589,9 +612,6 @@ func (b *windowsBackend) inspectDeclaration(action string, args []string) error 
 }
 
 func (b *windowsBackend) prepareDeclaration(service serviceDeclaration) (windowsServiceConfig, error) {
-	if service.hasSchedule() {
-		return windowsServiceConfig{}, errors.New("scheduled declarations are not supported on Windows yet")
-	}
 	options, err := parseStart(service.startArgs(b.exists(service.Name), b.system))
 	if err != nil {
 		return windowsServiceConfig{}, err
@@ -604,13 +624,30 @@ func (b *windowsBackend) prepareDeclaration(service serviceDeclaration) (windows
 		return windowsServiceConfig{}, errors.New("group has no Windows equivalent")
 	}
 	options.runAsUser, options.runAsGroup = "", ""
+	timezone := options.timezone
+	if service.hasSchedule() {
+		options.timezone = ""
+		if b.system && !windowsScheduledServiceAccount(runAs) {
+			return windowsServiceConfig{}, fmt.Errorf("scheduled system tasks currently require SYSTEM, LocalService, or NetworkService; got %q", runAs)
+		}
+	}
 	if err := rejectWindowsStartOptions(options); err != nil {
 		return windowsServiceConfig{}, err
 	}
 	if err := options.prepare(); err != nil {
 		return windowsServiceConfig{}, err
 	}
-	return windowsServiceConfig{Version: windowsStateVersion, Name: options.name, Description: options.description, Cwd: options.cwd, Command: append([]string(nil), options.command...), Env: append([]string(nil), options.env...), EnvFile: options.envFile, Restart: options.restart, RestartSec: options.restartSec, Enabled: options.enable, RunAs: runAs, After: append([]string(nil), options.after...), Wants: append([]string(nil), options.wants...), Requires: append([]string(nil), options.requires...)}, nil
+	config := windowsServiceConfig{Version: windowsStateVersion, Name: options.name, Description: options.description, Cwd: options.cwd, Command: append([]string(nil), options.command...), Env: append([]string(nil), options.env...), EnvFile: options.envFile, Restart: options.restart, RestartSec: options.restartSec, Enabled: options.enable, RunAs: runAs, After: append([]string(nil), options.after...), Wants: append([]string(nil), options.wants...), Requires: append([]string(nil), options.requires...)}
+	if service.hasSchedule() {
+		config.Mode, config.Restart = "schedule", "no"
+		config.Schedule, config.Timezone, config.TimerOnBoot = service.Schedule, timezone, service.TimerOnBoot
+		config.TimerInterval, config.TimerRandomDelay, config.Persistent = service.TimerInterval, service.TimerRandomDelay, service.Persistent
+		record := portableScheduleRecord{Version: 1, Name: config.Name, Command: config.Command, Cwd: config.Cwd, Schedule: config.Schedule, Timezone: config.Timezone, TimerOnBoot: config.TimerOnBoot, TimerInterval: config.TimerInterval, TimerRandomDelay: config.TimerRandomDelay, Persistent: config.Persistent, CreatedAt: time.Now()}
+		if err := validatePortableSchedule(record); err != nil {
+			return windowsServiceConfig{}, err
+		}
+	}
+	return config, nil
 }
 
 func (b *windowsBackend) printDeclarationPlan(services []serviceDeclaration, detailed bool) error {
@@ -657,6 +694,9 @@ func (b *windowsBackend) startManagedStack(name string, stack map[string]bool) e
 	config, err := b.readConfig(name)
 	if err != nil {
 		return err
+	}
+	if config.Mode == "schedule" {
+		return b.runScheduledTask(name, true)
 	}
 	for _, dependency := range config.Requires {
 		if !b.exists(dependency) {
@@ -971,6 +1011,14 @@ func (b *windowsBackend) writeControl(name, action string) error {
 }
 
 func (b *windowsBackend) stop(name string) error {
+	if config, err := b.readConfig(name); err == nil && config.Mode == "schedule" {
+		for _, kind := range []string{"timer", "boot"} {
+			command := exec.Command("schtasks.exe", "/End", "/TN", b.scheduleTaskName(name, kind))
+			command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+			_ = command.Run()
+		}
+		return nil
+	}
 	if b.system {
 		return b.stopSCMService(name)
 	}
@@ -984,6 +1032,25 @@ func (b *windowsBackend) controlMany(action string, selectors []string) error {
 	}
 	var errs []error
 	for _, name := range names {
+		config, _ := b.readConfig(name)
+		if config.Mode == "schedule" {
+			switch action {
+			case "stop":
+				err = b.stop(name)
+			case "restart":
+				err = b.runScheduledTask(name, true)
+			case "enable":
+				err = b.setScheduledEnabled(config, true)
+			case "disable":
+				err = b.setScheduledEnabled(config, false)
+			}
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			} else {
+				fmt.Fprintf(b.stdout, "%s %s\n", name, actionPastTense(action))
+			}
+			continue
+		}
 		switch action {
 		case "stop":
 			err = b.stop(name)
@@ -1014,6 +1081,9 @@ func (b *windowsBackend) setEnabled(name string, enabled bool) error {
 	config, err := b.readConfig(name)
 	if err != nil {
 		return err
+	}
+	if config.Mode == "schedule" {
+		return b.setScheduledEnabled(config, enabled)
 	}
 	if b.system {
 		previous := config.Enabled
@@ -1196,6 +1266,9 @@ func windowsSystemRootACLGrants() []string {
 }
 
 func (b *windowsBackend) unregister(name string) error {
+	if config, err := b.readConfig(name); err == nil && config.Mode == "schedule" {
+		return b.unregisterScheduledTask(name)
+	}
 	if !b.system {
 		if err := os.Remove(b.startupPath(name)); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove user logon shortcut: %w", err)
@@ -1248,6 +1321,19 @@ func (b *windowsBackend) list(options listOptions) error {
 		if configErr != nil {
 			continue
 		}
+		if config.Mode == "schedule" {
+			status := "disabled"
+			active := "inactive"
+			if config.Enabled {
+				status, active = "waiting", "active"
+			}
+			kind := "timer"
+			if config.Schedule == "" && config.TimerInterval == "" {
+				kind = "boot"
+			}
+			rows = append(rows, listRow{Name: name, Unit: b.scheduleTaskName(name, kind), Status: status, ActiveState: active, SubState: status, Health: "-", Enabled: map[bool]string{true: "enabled", false: "disabled"}[config.Enabled]})
+			continue
+		}
 		state := b.readState(name)
 		row := listRow{Name: name, Unit: "windows:" + name, Status: state.Status, ActiveState: state.Status, SubState: state.Status, Health: "-", PID: state.PID, Restarts: state.Restarts, Enabled: map[bool]string{true: "enabled", false: "disabled"}[config.Enabled]}
 		if state.PID > 0 && !state.StartedAt.IsZero() {
@@ -1280,6 +1366,18 @@ func (b *windowsBackend) status(name string) error {
 		scope, account = "system", valueOr(config.RunAs, "SYSTEM")
 	}
 	rows := [][2]string{{"status", state.Status}, {"name", name}, {"scope", scope}, {"account", account}}
+	if config.Mode == "schedule" {
+		scheduleState := readPortableScheduleState(filepath.Join(b.scheduleStateDir(name), "schedule-state.json"))
+		status := "disabled"
+		if config.Enabled {
+			status = "waiting"
+		}
+		rows = [][2]string{{"status", status}, {"name", name}, {"scope", scope}, {"account", account}, {"enabled", strconv.FormatBool(config.Enabled)}, {"schedule", valueOr(config.Schedule, "-")}, {"interval", valueOr(config.TimerInterval, "-")}, {"on boot", valueOr(config.TimerOnBoot, "-")}, {"timezone", valueOr(config.Timezone, "local")}, {"last scheduled", formatScheduleTime(scheduleState.LastScheduledAt)}, {"last finished", formatScheduleTime(scheduleState.LastFinishedAt)}, {"last exit code", scheduleExitCode(scheduleState.LastExitCode)}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"log", b.logPath(name)}}
+		for _, row := range rows {
+			fmt.Fprintf(w, "%s\t%s\n", row[0], row[1])
+		}
+		return w.Flush()
+	}
 	if b.system {
 		rows = append(rows, [2]string{"SCM service", b.scmName(name)})
 	}
@@ -1421,7 +1519,7 @@ func (b *windowsBackend) removeMany(args []string) error {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
-		if b.system || config.Enabled {
+		if config.Mode == "schedule" || b.system || config.Enabled {
 			_ = b.unregister(name)
 		}
 		if err := removeWindowsServiceData(b.serviceDir(name)); err != nil {

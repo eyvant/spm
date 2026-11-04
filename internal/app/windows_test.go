@@ -42,6 +42,28 @@ func TestWindowsRunAsScopesAndAliases(t *testing.T) {
 	}
 }
 
+func TestRenderWindowsScheduleTaskUsesPortableRunner(t *testing.T) {
+	config := windowsServiceConfig{Name: "backup", Description: "Nightly & safe", Enabled: true, Schedule: "*/5 * * * *"}
+	xml := renderWindowsScheduleTask(config, `C:\Program Files\spm\spm.exe`, `C:\data\schedule.json`, `C:\data\state`, `C:\data\task.log`, "S-1-5-18", "ServiceAccount", "timer", true)
+	for _, want := range []string{"<Interval>PT1M</Interval>", "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>", "<RunLevel>HighestAvailable</RunLevel>", "__scheduled-run", "Nightly &amp; safe", "S-1-5-18"} {
+		if !strings.Contains(xml, want) {
+			t.Errorf("task XML does not contain %q:\n%s", want, xml)
+		}
+	}
+}
+
+func TestWindowsScheduledDeclarationIsPortable(t *testing.T) {
+	b := &windowsBackend{root: t.TempDir(), stdout: io.Discard, stderr: io.Discard}
+	service := serviceDeclaration{Name: "job", Command: []string{"cmd.exe", "/c", "exit", "0"}, Schedule: "*/5 9-17 1 * 1-5", Timezone: "Asia/Singapore", Persistent: true}
+	config, err := b.prepareDeclaration(service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Mode != "schedule" || config.Schedule != service.Schedule || config.Timezone != service.Timezone || !config.Persistent {
+		t.Fatalf("unexpected schedule config: %#v", config)
+	}
+}
+
 func TestWindowsEnvironmentOverridesCaseInsensitively(t *testing.T) {
 	got := setWindowsEnv([]string{"Path=one", "KEEP=yes"}, "PATH", "two")
 	want := []string{"PATH=two", "KEEP=yes"}

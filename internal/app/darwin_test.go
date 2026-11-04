@@ -59,3 +59,25 @@ func TestDarwinXMLAndRestartPolicies(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderDarwinSchedulePlistUsesPortableRunner(t *testing.T) {
+	config := darwinServiceConfig{Name: "backup", Description: "Nightly & safe", Enabled: true, Schedule: "*/5 * * * *"}
+	plist := renderDarwinSchedulePlist(config, "com.eyvant.spm.backup", "/usr/local/bin/spm", "/tmp/schedule.json", "/tmp/state", "/tmp/task.log", "timer", false)
+	for _, want := range []string{"<key>StartInterval</key>", "<integer>60</integer>", "__scheduled-run", "Nightly &amp; safe", "<string>timer</string>"} {
+		if !strings.Contains(plist, want) {
+			t.Errorf("schedule plist does not contain %q:\n%s", want, plist)
+		}
+	}
+}
+
+func TestDarwinScheduledDeclarationIsPortable(t *testing.T) {
+	b := &darwinBackend{root: t.TempDir(), plistDir: t.TempDir(), uid: os.Getuid()}
+	service := serviceDeclaration{Name: "job", Command: []string{"/usr/bin/true"}, Schedule: "*/5 9-17 1 * 1-5", Timezone: "Asia/Singapore", Persistent: true}
+	config, err := b.prepareDeclaration(service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Mode != "schedule" || config.Schedule != service.Schedule || config.Timezone != service.Timezone || !config.Persistent {
+		t.Fatalf("unexpected schedule config: %#v", config)
+	}
+}
