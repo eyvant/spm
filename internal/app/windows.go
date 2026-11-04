@@ -1331,7 +1331,7 @@ func (b *windowsBackend) list(options listOptions) error {
 			if config.Schedule == "" && config.TimerInterval == "" {
 				kind = "boot"
 			}
-			rows = append(rows, listRow{Name: name, Unit: b.scheduleTaskName(name, kind), Status: status, ActiveState: active, SubState: status, Health: "-", Enabled: map[bool]string{true: "enabled", false: "disabled"}[config.Enabled]})
+			rows = append(rows, listRow{Name: name, Unit: b.scheduleTaskName(name, kind), Status: status, ActiveState: active, SubState: status, Health: "-", Enabled: map[bool]string{true: "enabled", false: "disabled"}[config.Enabled], Schedule: portableScheduleSummary(config.Schedule, config.Timezone, config.TimerOnBoot, config.TimerInterval, config.TimerRandomDelay)})
 			continue
 		}
 		state := b.readState(name)

@@ -42,6 +42,27 @@ type cpuSample struct {
 	usage map[string]uint64
 }
 
+func portableScheduleSummary(schedule, timezone, onBoot, interval, randomDelay string) string {
+	var values []string
+	if schedule != "" {
+		value := schedule
+		if timezone != "" {
+			value += " " + timezone
+		}
+		values = append(values, value)
+	}
+	if onBoot != "" {
+		values = append(values, "boot+"+onBoot)
+	}
+	if interval != "" {
+		values = append(values, "every "+interval)
+	}
+	if randomDelay != "" {
+		values = append(values, "jitter "+randomDelay)
+	}
+	return strings.Join(values, ", ")
+}
+
 func parseList(args []string) (listOptions, error) {
 	options := listOptions{}
 	for _, arg := range args {

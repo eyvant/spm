@@ -231,9 +231,14 @@ $accountLine
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
     if ($task.State -eq 'Disabled') { throw "$taskName was unexpectedly disabled" }
     $taskXml = Export-ScheduledTask -TaskName $taskName
-    if ($taskXml -notmatch '__scheduled-run' -or $taskXml -notmatch '<Interval>PT1M</Interval>') {
+    if ($taskXml -notmatch 'wscript.exe' -or $taskXml -notmatch 'schedule-timer.vbs' -or $taskXml -notmatch '<Interval>PT1M</Interval>') {
         throw "Unexpected schedule task XML: $taskXml"
     }
+	$launcher = Join-Path $data "services\$scheduled\schedule-timer.vbs"
+	$launcherText = Get-Content -LiteralPath $launcher -Raw
+	if ($launcherText -notmatch '__scheduled-run' -or $launcherText -notmatch ', 0, True') {
+		throw "Unexpected hidden schedule launcher: $launcherText"
+	}
     try {
         Wait-File $scheduleMarker 100
     } catch {

@@ -3,6 +3,7 @@
 package app
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,25 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestWindowsListIncludesSchedule(t *testing.T) {
+	var output bytes.Buffer
+	b := &windowsBackend{root: localTempDir(t), stdout: &output, stderr: io.Discard}
+	config := windowsServiceConfig{
+		Version: windowsStateVersion,
+		Name:    "backup", Command: []string{"backup.exe"}, Mode: "schedule", Enabled: true,
+		Schedule: "0 4 * * *", Timezone: "Asia/Shanghai",
+	}
+	if err := b.writeConfig(config); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.list(listOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "0 4 * * * Asia/Shanghai") {
+		t.Fatalf("list output does not include schedule:\n%s", got)
+	}
+}
 
 func TestWindowsRunAsScopesAndAliases(t *testing.T) {
 	tests := []struct {
@@ -44,14 +64,31 @@ func TestWindowsRunAsScopesAndAliases(t *testing.T) {
 
 func TestRenderWindowsScheduleTaskUsesPortableRunner(t *testing.T) {
 	config := windowsServiceConfig{Name: "backup", Description: "Nightly & safe", Enabled: true, Schedule: "*/5 * * * *"}
-	xml := renderWindowsScheduleTask(config, `C:\Program Files\spm\spm.exe`, `C:\data\schedule.json`, `C:\data\state`, `C:\data\task.log`, "S-1-5-18", "", "timer", true)
-	for _, want := range []string{"<Interval>PT1M</Interval>", "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>", "<RunLevel>HighestAvailable</RunLevel>", "__scheduled-run", "Nightly &amp; safe", "S-1-5-18"} {
+	xml := renderWindowsScheduleTask(config, `C:\data\schedule-timer.vbs`, "S-1-5-18", "", "timer", true)
+	for _, want := range []string{"<Interval>PT1M</Interval>", "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>", "<RunLevel>HighestAvailable</RunLevel>", "wscript.exe", "//B //Nologo", "schedule-timer.vbs", "Nightly &amp; safe", "S-1-5-18"} {
 		if !strings.Contains(xml, want) {
 			t.Errorf("task XML does not contain %q:\n%s", want, xml)
 		}
 	}
 	if strings.Contains(xml, "<LogonType>") {
 		t.Errorf("system task XML should omit LogonType for Task Scheduler compatibility:\n%s", xml)
+	}
+}
+
+func TestWriteWindowsScheduleLauncherHidesRunner(t *testing.T) {
+	path := filepath.Join(localTempDir(t), "schedule-timer.vbs")
+	if err := writeWindowsScheduleLauncher(path, `C:\Program Files\spm\spm.exe`, `C:\data\schedule.json`, `C:\data\state`, `C:\data\task.log`, "timer"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(data)
+	for _, want := range []string{`shell.Run(`, `, 0, True)`, `__scheduled-run`, `"C:\Program Files\spm\spm.exe"`, `--activation`, `timer`} {
+		if !strings.Contains(script, want) {
+			t.Errorf("launcher does not contain %q:\n%s", want, script)
+		}
 	}
 }
 

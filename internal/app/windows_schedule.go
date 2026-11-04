@@ -24,6 +24,10 @@ func (b *windowsBackend) scheduleStateDir(name string) string {
 	return filepath.Join(b.serviceDir(name), "schedule-state")
 }
 
+func (b *windowsBackend) scheduleLauncherPath(name, activation string) string {
+	return filepath.Join(b.serviceDir(name), "schedule-"+activation+".vbs")
+}
+
 func (b *windowsBackend) scheduleTaskName(name, kind string) string {
 	suffix := ""
 	if kind == "boot" {
@@ -134,20 +138,30 @@ func (b *windowsBackend) registerScheduledTask(config windowsServiceConfig) erro
 		return err
 	}
 	if config.Schedule != "" || config.TimerInterval != "" {
-		xml := renderWindowsScheduleTask(config, executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), principal, logonType, "timer", b.system)
+		launcher := b.scheduleLauncherPath(config.Name, "timer")
+		if err := writeWindowsScheduleLauncher(launcher, executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), "timer"); err != nil {
+			return err
+		}
+		xml := renderWindowsScheduleTask(config, launcher, principal, logonType, "timer", b.system)
 		if err := b.createScheduledTask(b.scheduleTaskName(config.Name, "timer"), xml); err != nil {
 			return err
 		}
 	} else {
 		_ = b.deleteScheduledTask(b.scheduleTaskName(config.Name, "timer"))
+		_ = os.Remove(b.scheduleLauncherPath(config.Name, "timer"))
 	}
 	if config.TimerOnBoot != "" {
-		xml := renderWindowsScheduleTask(config, executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), principal, logonType, "boot", b.system)
+		launcher := b.scheduleLauncherPath(config.Name, "boot")
+		if err := writeWindowsScheduleLauncher(launcher, executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), "boot"); err != nil {
+			return err
+		}
+		xml := renderWindowsScheduleTask(config, launcher, principal, logonType, "boot", b.system)
 		if err := b.createScheduledTask(b.scheduleTaskName(config.Name, "boot"), xml); err != nil {
 			return err
 		}
 	} else {
 		_ = b.deleteScheduledTask(b.scheduleTaskName(config.Name, "boot"))
+		_ = os.Remove(b.scheduleLauncherPath(config.Name, "boot"))
 	}
 	return nil
 }
@@ -175,12 +189,23 @@ func (b *windowsBackend) scheduledTaskPrincipal(runAs string) (string, string, e
 	}
 }
 
-func renderWindowsScheduleTask(config windowsServiceConfig, executable, recordPath, stateDir, logPath, principal, logonType, activation string, system bool) string {
+func writeWindowsScheduleLauncher(path, executable, recordPath, stateDir, logPath, activation string) error {
 	arguments := []string{"__scheduled-run", "--config", recordPath, "--state-dir", stateDir, "--log", logPath, "--activation", activation}
-	quoted := make([]string, len(arguments))
-	for index, value := range arguments {
-		quoted[index] = windowsQuoteCommand(value)
+	command := windowsQuoteCommand(executable)
+	for _, value := range arguments {
+		command += " " + windowsQuoteCommand(value)
 	}
+	script := "Set shell = CreateObject(\"WScript.Shell\")\r\n" +
+		"exitCode = shell.Run(" + vbscriptString(command) + ", 0, True)\r\n" +
+		"WScript.Quit exitCode\r\n"
+	return writeFileAtomic(path, []byte(script), 0o600)
+}
+
+func vbscriptString(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func renderWindowsScheduleTask(config windowsServiceConfig, launcherPath, principal, logonType, activation string, system bool) string {
 	trigger := ""
 	runLevel := "LeastPrivilege"
 	if system {
@@ -206,7 +231,7 @@ func renderWindowsScheduleTask(config windowsServiceConfig, executable, recordPa
 		"  <Triggers>\n" + trigger + "  </Triggers>\n" +
 		"  <Principals><Principal id=\"Author\"><UserId>" + windowsXMLEscape(principal) + "</UserId>" + logonTypeXML + "<RunLevel>" + runLevel + "</RunLevel></Principal></Principals>\n" +
 		"  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><Enabled>" + strconv.FormatBool(config.Enabled) + "</Enabled><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>\n" +
-		"  <Actions Context=\"Author\"><Exec><Command>" + windowsXMLEscape(executable) + "</Command><Arguments>" + windowsXMLEscape(strings.Join(quoted, " ")) + "</Arguments></Exec></Actions>\n" +
+		"  <Actions Context=\"Author\"><Exec><Command>wscript.exe</Command><Arguments>//B //Nologo " + windowsXMLEscape(windowsQuoteCommand(launcherPath)) + "</Arguments></Exec></Actions>\n" +
 		"</Task>\n"
 }
 
