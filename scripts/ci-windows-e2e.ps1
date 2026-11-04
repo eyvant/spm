@@ -108,10 +108,16 @@ function Wait-File([string]$Path, [int]$TimeoutSeconds = 90) {
 function Write-ScheduleDiagnostics([string]$Name) {
     $taskName = "spm-$Name-schedule"
     Write-Warning "Scheduled task diagnostics for $taskName"
-    try { Get-ScheduledTask -TaskName $taskName | Format-List * | Out-Host } catch { Write-Warning $_ }
-    try { Get-ScheduledTaskInfo -TaskName $taskName | Format-List * | Out-Host } catch { Write-Warning $_ }
-    try { Invoke-Spm @('status', $Name) | Out-Host } catch { Write-Warning $_ }
-    try { Invoke-Spm @('logs', '--lines', '200', $Name) | Out-Host } catch { Write-Warning $_ }
+    $taskText = try { Get-ScheduledTask -TaskName $taskName | Select-Object TaskName,State | Format-List | Out-String } catch { $_ | Out-String }
+    $infoText = try { Get-ScheduledTaskInfo -TaskName $taskName | Select-Object LastRunTime,LastTaskResult,NextRunTime,NumberOfMissedRuns | Format-List | Out-String } catch { $_ | Out-String }
+    $statusText = try { (Invoke-Spm @('status', $Name) -Capture) -join [Environment]::NewLine } catch { $_ | Out-String }
+    $logText = try { (Invoke-Spm @('logs', '--lines', '200', $Name) -Capture) -join [Environment]::NewLine } catch { $_ | Out-String }
+    $diagnostics = "TASK`n$taskText`nINFO`n$infoText`nSTATUS`n$statusText`nLOG`n$logText"
+    Write-Host $diagnostics
+    if ($env:GITHUB_ACTIONS -eq 'true') {
+        $encoded = $diagnostics.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+        Write-Host "::error title=Scheduled task diagnostics::$encoded"
+    }
 }
 
 function Start-Workload([string]$Name, [string]$Account = '') {
