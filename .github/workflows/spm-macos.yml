@@ -36,6 +36,9 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Test installer
+        run: sh scripts/test-install-sh.sh
+
       - name: Build
         run: go build -buildvcs=false -o spm-ci ./cmd/spm
 

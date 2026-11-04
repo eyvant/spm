@@ -45,6 +45,25 @@ The Windows installer verifies the release checksum, installs `spm.exe` under
 `%LOCALAPPDATA%\Programs\spm`, adds it to the user `PATH`, and installs dynamic
 PowerShell completion. Use `install.ps1 -NoCompletion` or `-NoPath` when needed.
 
+Uninstall SPM on Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eyvant/spm/main/install.sh | sh -s -- --uninstall
+```
+
+Uninstall SPM on Windows:
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/eyvant/spm/releases/latest/download/install.ps1))) -Uninstall
+```
+
+The uninstallers remove the executable, installed shell completion, and—on
+Windows—the PowerShell profile entry and user `PATH` entry. They do not delete
+managed services or their data. If services still exist, uninstall stops and
+asks you to delete them first (`spm delete all --yes`, and `sudo spm --system
+delete all --yes` when applicable); use `--force` or `-Force` only when you
+intentionally want to leave those services behind.
+
 Install a specific version:
 
 ```bash

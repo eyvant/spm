@@ -3,11 +3,85 @@ param(
     [string]$Version = "latest",
     [string]$InstallDir = "$env:LOCALAPPDATA\Programs\spm",
     [switch]$NoCompletion,
-    [switch]$NoPath
+    [switch]$NoPath,
+    [switch]$Uninstall,
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
 $repository = "eyvant/spm"
+
+if ($Force -and -not $Uninstall) {
+    throw "-Force is only valid with -Uninstall"
+}
+
+if ($Uninstall) {
+    $dataRoots = if ($env:SPM_WINDOWS_DATA_DIR) {
+        @($env:SPM_WINDOWS_DATA_DIR)
+    } else {
+        @(
+            (Join-Path $env:APPDATA "spm")
+            (Join-Path $env:ProgramData "spm")
+        )
+    }
+    $hasManagedServices = $false
+    $serviceInspectionFailed = $false
+    foreach ($dataRoot in $dataRoots) {
+        $servicesDirectory = Join-Path $dataRoot "services"
+        try {
+            if ((Test-Path -LiteralPath $servicesDirectory) -and
+                (Get-ChildItem -Force -LiteralPath $servicesDirectory | Select-Object -First 1)) {
+                $hasManagedServices = $true
+                break
+            }
+        } catch {
+            $serviceInspectionFailed = $true
+            Write-Warning "Could not inspect $servicesDirectory; run the uninstaller as Administrator to check system services."
+        }
+    }
+    if ($serviceInspectionFailed -and -not $Force) {
+        throw "Could not verify that all managed services are removed. Run as Administrator, or pass -Force to remove the CLI without deleting services."
+    }
+    if ($hasManagedServices -and -not $Force) {
+        throw "Managed services still exist. Run 'spm delete all --yes' and 'spm --system delete all --yes' from an Administrator terminal as applicable, or pass -Force to remove the CLI without deleting services."
+    }
+
+    $completion = Join-Path $InstallDir "spm-completion.ps1"
+    $profilePath = $PROFILE.CurrentUserAllHosts
+    $profileLine = ". '$($completion.Replace("'", "''"))'"
+    if (Test-Path -LiteralPath $profilePath) {
+        $profileLines = @(Get-Content -LiteralPath $profilePath)
+        $remainingLines = @($profileLines | Where-Object { $_ -ne $profileLine })
+        if ($remainingLines.Count -ne $profileLines.Count) {
+            Set-Content -Encoding UTF8 -LiteralPath $profilePath -Value $remainingLines
+            Write-Host "Removed spm completion from $profilePath"
+        }
+    }
+
+    foreach ($path in @((Join-Path $InstallDir "spm.exe"), $completion)) {
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -Force -LiteralPath $path
+            Write-Host "Removed $path"
+        }
+    }
+
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $normalizedInstallDir = $InstallDir.TrimEnd('\', '/')
+    $pathParts = @($userPath -split ';' | Where-Object {
+        $_ -and $_.TrimEnd('\', '/') -ine $normalizedInstallDir
+    })
+    $updatedPath = $pathParts -join ';'
+    if ($updatedPath -ne $userPath) {
+        [Environment]::SetEnvironmentVariable("Path", $updatedPath, "User")
+        Write-Host "Removed $InstallDir from the user PATH. Open a new terminal to refresh it."
+    }
+
+    if ((Test-Path -LiteralPath $InstallDir) -and -not (Get-ChildItem -Force -LiteralPath $InstallDir | Select-Object -First 1)) {
+        Remove-Item -Force -LiteralPath $InstallDir
+    }
+    Write-Host "Uninstalled spm. Managed service data was not removed."
+    return
+}
 
 if (-not [Environment]::Is64BitOperatingSystem) {
     throw "spm requires 64-bit Windows"

@@ -43,6 +43,10 @@ jobs:
       - name: Build
         run: go build -buildvcs=false -o spm.exe ./cmd/spm
 
+      - name: Test installer
+        shell: pwsh
+        run: .\scripts\test-install-ps1.ps1 -Spm .\spm.exe
+
       - name: Exercise Windows user services
         shell: pwsh
         env:

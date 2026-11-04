@@ -6,20 +6,25 @@ repository="eyvant/spm"
 requested_version="latest"
 install_dir="${SPM_INSTALL_DIR:-${HOME}/.local/bin}"
 completion_shell="${SPM_COMPLETION:-auto}"
+uninstall=false
+force=false
 
 usage() {
   cat <<'EOF'
-Install spm from a GitHub Release.
+Install or uninstall spm.
 
 Usage:
   install.sh [--version VERSION] [--install-dir DIRECTORY]
              [--completion auto|bash|zsh|fish|none]
+  install.sh --uninstall [--install-dir DIRECTORY] [--force]
 
 Options:
   --version VERSION       Install a release such as v0.1.0 or 0.1.0.
   --install-dir DIRECTORY Install to DIRECTORY instead of ~/.local/bin.
   --completion SHELL      Install completion for SHELL (default: auto).
   --no-completion         Do not install shell completion.
+  --uninstall             Remove spm and all installed shell completions.
+  --force                 Uninstall even when managed user services exist.
   -h, --help              Show this help.
 
 Environment:
@@ -54,6 +59,14 @@ while [ "$#" -gt 0 ]; do
       completion_shell="none"
       shift
       ;;
+    --uninstall)
+      uninstall=true
+      shift
+      ;;
+    --force)
+      force=true
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -63,6 +76,85 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "$force" = true ] && [ "$uninstall" != true ]; then
+  fail "--force is only valid with --uninstall"
+fi
+
+directory_has_entries() {
+  [ -d "$1" ] || return 1
+  for entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+    if [ -e "$entry" ] || [ -L "$entry" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+managed_services_exist() {
+  case "$(uname -s)" in
+    Linux)
+      config_home="${XDG_CONFIG_HOME:-${HOME}/.config}"
+      if directory_has_entries "${config_home}/spm/services" || directory_has_entries "/etc/spm/services"; then
+        return 0
+      fi
+      for unit in "${config_home}/systemd/user"/spm-*.service "${config_home}/systemd/user"/spm-*.timer; do
+        if [ -e "$unit" ] || [ -L "$unit" ]; then
+          return 0
+        fi
+      done
+      for unit in /etc/systemd/system/spm-*.service /etc/systemd/system/spm-*.timer; do
+        if [ -e "$unit" ] || [ -L "$unit" ]; then
+          return 0
+        fi
+      done
+      ;;
+    Darwin)
+      if directory_has_entries "${HOME}/Library/Application Support/spm/services" || directory_has_entries "/Library/Application Support/spm/services"; then
+        return 0
+      fi
+      for plist in "${HOME}/Library/LaunchAgents"/com.eyvant.spm.*.plist; do
+        if [ -e "$plist" ] || [ -L "$plist" ]; then
+          return 0
+        fi
+      done
+      for plist in /Library/LaunchDaemons/com.eyvant.spm.*.plist; do
+        if [ -e "$plist" ] || [ -L "$plist" ]; then
+          return 0
+        fi
+      done
+      ;;
+  esac
+  return 1
+}
+
+remove_installed_file() {
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    rm -f -- "$1"
+    printf 'Removed %s\n' "$1"
+    removed=true
+  fi
+}
+
+if [ "$uninstall" = true ]; then
+  if managed_services_exist && [ "$force" != true ]; then
+    fail "managed services still exist; run 'spm delete all --yes' and 'sudo spm --system delete all --yes' as applicable, or pass --force to remove the CLI without deleting services"
+  fi
+
+  removed=false
+  remove_installed_file "${install_dir}/spm"
+  remove_installed_file "${XDG_DATA_HOME:-${HOME}/.local/share}/bash-completion/completions/spm.bash"
+  remove_installed_file "${HOME}/.zfunc/_spm"
+  remove_installed_file "${XDG_CONFIG_HOME:-${HOME}/.config}/fish/completions/spm.fish"
+  rmdir "$install_dir" 2>/dev/null || true
+
+  if [ "$removed" = true ]; then
+    printf 'Uninstalled spm. Managed service data was not removed.\n'
+  else
+    printf 'spm is not installed in %s.\n' "$install_dir"
+  fi
+  exit 0
+fi
 
 case "$completion_shell" in
   auto|bash|zsh|fish|none) ;;
