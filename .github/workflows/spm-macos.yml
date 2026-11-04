@@ -12,13 +12,17 @@ permissions:
 
 jobs:
   test:
-    name: macOS ${{ matrix.os }}
+    name: macOS ${{ matrix.os }} / Go ${{ matrix.go }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15-intel, macos-26-intel]
+        include:
+          - os: macos-15-intel
+            go: 1.21.x
+          - os: macos-26-intel
+            go: stable
 
     steps:
       - name: Check out repository
@@ -27,7 +31,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go }}
           cache-dependency-path: |
             go.mod
             go.sum
