@@ -150,7 +150,11 @@ for path in \
   [ ! -e "$path" ] || fail "uninstall left $path behind"
 done
 
-mkdir -p "$install_dir" "${config_home}/spm/services/api"
+case "$platform" in
+  linux) managed_service_dir="${config_home}/spm/services/api" ;;
+  macos) managed_service_dir="${test_home}/Library/Application Support/spm/services/api" ;;
+esac
+mkdir -p "$install_dir" "$managed_service_dir"
 : > "${install_dir}/spm"
 if output=$(sh "$installer" --uninstall 2>&1); then
   fail "uninstall succeeded while a managed service existed"
