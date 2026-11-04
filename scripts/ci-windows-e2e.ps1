@@ -85,15 +85,18 @@ function Wait-Running([string]$Name) {
     throw "$Name did not reach running state."
 }
 
-function Wait-Log([string]$Name, [string]$Pattern) {
-    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+function Wait-Log([string]$Name, [string]$Pattern, [int]$TimeoutSeconds = 30) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastLog = ''
+    while ([DateTime]::UtcNow -lt $deadline) {
         try {
-            $log = (Invoke-Spm @('logs', '--lines', '100', '--grep', $Pattern, $Name) -Capture) -join "`n"
-            if ($log -match [regex]::Escape($Pattern)) { return }
+            $lastLog = (Invoke-Spm @('logs', '--lines', '100', $Name) -Capture) -join "`n"
+            if ($lastLog -match [regex]::Escape($Pattern)) { return }
         } catch {}
         Start-Sleep -Milliseconds 250
     }
-    throw "$Name did not log $Pattern."
+    $status = try { (Invoke-Spm @('status', $Name) -Capture) -join "`n" } catch { $_ | Out-String }
+    throw "$Name did not log $Pattern after $TimeoutSeconds seconds.`nSTATUS`n$status`nLOG`n$lastLog"
 }
 
 function Wait-File([string]$Path, [int]$TimeoutSeconds = 90) {
