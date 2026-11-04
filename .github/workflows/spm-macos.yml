@@ -1,4 +1,4 @@
-name: macOS
+name: spm macOS
 
 "on":
   push:
