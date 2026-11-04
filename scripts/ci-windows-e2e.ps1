@@ -105,6 +105,15 @@ function Wait-File([string]$Path, [int]$TimeoutSeconds = 90) {
     throw "Timed out waiting for $Path"
 }
 
+function Write-ScheduleDiagnostics([string]$Name) {
+    $taskName = "spm-$Name-schedule"
+    Write-Warning "Scheduled task diagnostics for $taskName"
+    try { Get-ScheduledTask -TaskName $taskName | Format-List * | Out-Host } catch { Write-Warning $_ }
+    try { Get-ScheduledTaskInfo -TaskName $taskName | Format-List * | Out-Host } catch { Write-Warning $_ }
+    try { Invoke-Spm @('status', $Name) | Out-Host } catch { Write-Warning $_ }
+    try { Invoke-Spm @('logs', '--lines', '200', $Name) | Out-Host } catch { Write-Warning $_ }
+}
+
 function Start-Workload([string]$Name, [string]$Account = '') {
     $arguments = @('start', $script:workload, '--name', $Name, '--no-enable', '--restart', 'no', '--cwd', (Split-Path $script:workload))
     if ($script:system -and $Account) { $arguments += @('--user', $Account) }
@@ -189,7 +198,10 @@ $accountLine
         'schedule', '--name', $scheduled, '--cron', '* * * * *', '--timezone', 'UTC',
         '--persistent', '--randomized-delay', '1s', '--cwd', (Split-Path $scheduleMarker)
     )
-    if ($system) { $scheduleArguments += @('--user', 'LocalService') }
+    # SYSTEM is the canonical non-interactive Task Scheduler principal on
+    # hosted Windows runners. LocalService and NetworkService account mapping
+    # remain covered below by the SCM account matrix.
+    if ($system) { $scheduleArguments += @('--user', 'SYSTEM') }
     $scheduleArguments += @(
         '--',
         $powershell, '-NoProfile', '-NonInteractive', '-Command',
@@ -203,7 +215,12 @@ $accountLine
     if ($taskXml -notmatch '__scheduled-run' -or $taskXml -notmatch '<Interval>PT1M</Interval>') {
         throw "Unexpected schedule task XML: $taskXml"
     }
-    Wait-File $scheduleMarker 100
+    try {
+        Wait-File $scheduleMarker 100
+    } catch {
+        Write-ScheduleDiagnostics $scheduled
+        throw
+    }
     $scheduleStatus = (Invoke-Spm @('status', $scheduled) -Capture) -join "`n"
     if ($scheduleStatus -notmatch 'status\s+waiting' -or $scheduleStatus -notmatch 'last exit code\s+0') {
         throw "Unexpected scheduled task status: $scheduleStatus"
@@ -220,7 +237,7 @@ $accountLine
     Write-Host "==> $Scope declarative scheduled task"
     $escapedPowerShell = $powershell.Replace('\', '\\')
     $escapedMarker = $scheduleMarker.Replace('\', '\\').Replace('"', '\"')
-    $scheduleAccountLine = if ($system) { 'user = "LocalService"' } else { '' }
+    $scheduleAccountLine = if ($system) { 'user = "SYSTEM"' } else { '' }
     $scheduleDocument = @"
 schema = 1
 [[services]]
