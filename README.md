@@ -1,8 +1,18 @@
-# spm
+# SPM
 
-Run applications as persistent services on Linux, Windows, and macOS without writing service definitions.
+**A simple, cross-platform manager for native system services.**
 
-`spm` provides one PM2-like command line across three native service managers. Linux uses systemd and journald, Windows uses per-user supervisors plus Startup and native SCM services for system scope, and macOS uses launchd LaunchAgents or LaunchDaemons.
+SPM provides a unified command-line interface for managing native system services across Windows, Linux, and macOS.
+
+It works with each operating system's native service manager:
+
+- **Linux:** systemd
+- **macOS:** launchd
+- **Windows:** Windows Services
+
+SPM aims to make service management consistent, simple, and intuitive across platforms.
+
+Under the hood, Linux uses systemd and journald, macOS uses launchd LaunchAgents or LaunchDaemons, and Windows uses per-user supervisors with Startup integration or native SCM services for system scope.
 
 > User services do not require elevation. Use `--system` explicitly when a service must run at the machine level.
 
