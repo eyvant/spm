@@ -105,6 +105,19 @@ function Wait-File([string]$Path, [int]$TimeoutSeconds = 90) {
     throw "Timed out waiting for $Path"
 }
 
+function Wait-ScheduleSuccess([string]$Name, [int]$TimeoutSeconds = 20) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastStatus = ''
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $lastStatus = (Invoke-Spm @('status', $Name) -Capture) -join "`n"
+        if ($lastStatus -match 'status\s+waiting' -and $lastStatus -match 'last exit code\s+0') {
+            return $lastStatus
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "Scheduled task state did not settle after $TimeoutSeconds seconds: $lastStatus"
+}
+
 function Write-ScheduleDiagnostics([string]$Name) {
     $taskName = "spm-$Name-schedule"
     Write-Warning "Scheduled task diagnostics for $taskName"
@@ -227,10 +240,7 @@ $accountLine
         Write-ScheduleDiagnostics $scheduled
         throw
     }
-    $scheduleStatus = (Invoke-Spm @('status', $scheduled) -Capture) -join "`n"
-    if ($scheduleStatus -notmatch 'status\s+waiting' -or $scheduleStatus -notmatch 'last exit code\s+0') {
-        throw "Unexpected scheduled task status: $scheduleStatus"
-    }
+    $scheduleStatus = Wait-ScheduleSuccess $scheduled
     $beforeManual = @(Get-Content -LiteralPath $scheduleMarker).Count
     Invoke-Spm @('run', $scheduled) | Out-Null
     $afterManual = @(Get-Content -LiteralPath $scheduleMarker).Count
