@@ -183,7 +183,7 @@ jobs:
   build-macos:
     name: Build ${{ matrix.name }}
     needs: ci
-    runs-on: macos-15
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
