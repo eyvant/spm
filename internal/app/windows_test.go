@@ -44,10 +44,30 @@ func TestWindowsRunAsScopesAndAliases(t *testing.T) {
 
 func TestRenderWindowsScheduleTaskUsesPortableRunner(t *testing.T) {
 	config := windowsServiceConfig{Name: "backup", Description: "Nightly & safe", Enabled: true, Schedule: "*/5 * * * *"}
-	xml := renderWindowsScheduleTask(config, `C:\Program Files\spm\spm.exe`, `C:\data\schedule.json`, `C:\data\state`, `C:\data\task.log`, "S-1-5-18", "ServiceAccount", "timer", true)
+	xml := renderWindowsScheduleTask(config, `C:\Program Files\spm\spm.exe`, `C:\data\schedule.json`, `C:\data\state`, `C:\data\task.log`, "S-1-5-18", "", "timer", true)
 	for _, want := range []string{"<Interval>PT1M</Interval>", "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>", "<RunLevel>HighestAvailable</RunLevel>", "__scheduled-run", "Nightly &amp; safe", "S-1-5-18"} {
 		if !strings.Contains(xml, want) {
 			t.Errorf("task XML does not contain %q:\n%s", want, xml)
+		}
+	}
+	if strings.Contains(xml, "<LogonType>") {
+		t.Errorf("system task XML should omit LogonType for Task Scheduler compatibility:\n%s", xml)
+	}
+}
+
+func TestWindowsScheduledSystemPrincipalsOmitLogonType(t *testing.T) {
+	b := &windowsBackend{system: true}
+	for _, test := range []struct {
+		runAs string
+		want  string
+	}{
+		{"SYSTEM", "S-1-5-18"},
+		{`NT AUTHORITY\LOCALSERVICE`, "S-1-5-19"},
+		{`NT AUTHORITY\NETWORKSERVICE`, "S-1-5-20"},
+	} {
+		principal, logonType, err := b.scheduledTaskPrincipal(test.runAs)
+		if err != nil || principal != test.want || logonType != "" {
+			t.Errorf("scheduledTaskPrincipal(%q) = %q, %q, %v; want %q, empty logon type", test.runAs, principal, logonType, err, test.want)
 		}
 	}
 }

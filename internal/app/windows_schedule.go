@@ -165,11 +165,11 @@ func (b *windowsBackend) scheduledTaskPrincipal(runAs string) (string, string, e
 	}
 	switch strings.ToUpper(runAs) {
 	case "", "SYSTEM":
-		return "S-1-5-18", "ServiceAccount", nil
+		return "S-1-5-18", "", nil
 	case `NT AUTHORITY\LOCALSERVICE`:
-		return "S-1-5-19", "ServiceAccount", nil
+		return "S-1-5-19", "", nil
 	case `NT AUTHORITY\NETWORKSERVICE`:
-		return "S-1-5-20", "ServiceAccount", nil
+		return "S-1-5-20", "", nil
 	default:
 		return "", "", fmt.Errorf("unsupported scheduled task account %q", runAs)
 	}
@@ -196,11 +196,15 @@ func renderWindowsScheduleTask(config windowsServiceConfig, executable, recordPa
 		start := time.Now().Add(time.Minute).Truncate(time.Minute).Format("2006-01-02T15:04:05")
 		trigger = fmt.Sprintf("    <CalendarTrigger>\n      <Repetition><Interval>PT1M</Interval><Duration>P1D</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>\n      <StartBoundary>%s</StartBoundary>\n      <Enabled>%t</Enabled>\n      <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>\n    </CalendarTrigger>\n", start, config.Enabled)
 	}
+	logonTypeXML := ""
+	if logonType != "" {
+		logonTypeXML = "<LogonType>" + windowsXMLEscape(logonType) + "</LogonType>"
+	}
 	return `<?xml version="1.0" encoding="UTF-16"?>` + "\n" +
 		`<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">` + "\n" +
 		"  <RegistrationInfo><Description>" + windowsXMLEscape(valueOr(config.Description, "SPM scheduled task "+config.Name)) + "</Description></RegistrationInfo>\n" +
 		"  <Triggers>\n" + trigger + "  </Triggers>\n" +
-		"  <Principals><Principal id=\"Author\"><UserId>" + windowsXMLEscape(principal) + "</UserId><LogonType>" + logonType + "</LogonType><RunLevel>" + runLevel + "</RunLevel></Principal></Principals>\n" +
+		"  <Principals><Principal id=\"Author\"><UserId>" + windowsXMLEscape(principal) + "</UserId>" + logonTypeXML + "<RunLevel>" + runLevel + "</RunLevel></Principal></Principals>\n" +
 		"  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><Enabled>" + strconv.FormatBool(config.Enabled) + "</Enabled><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>\n" +
 		"  <Actions Context=\"Author\"><Exec><Command>" + windowsXMLEscape(executable) + "</Command><Arguments>" + windowsXMLEscape(strings.Join(quoted, " ")) + "</Arguments></Exec></Actions>\n" +
 		"</Task>\n"
