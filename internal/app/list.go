@@ -10,10 +10,7 @@ import (
 	"time"
 )
 
-const (
-	defaultWatchInterval = 2 * time.Second
-	cpuSampleInterval    = 500 * time.Millisecond
-)
+const defaultWatchInterval = 2 * time.Second
 
 type listOptions struct {
 	json          bool
@@ -116,8 +113,8 @@ func (a *application) pause(duration time.Duration) {
 	time.Sleep(duration)
 }
 
-// collectListRows reads all rows. Without a previous sample it takes two CPU
-// samples so that one-shot `spm list` can still show CPU usage.
+// collectListRows reads all rows. A one-shot list reports CPU averaged over the
+// service uptime; watch mode uses the difference between refresh samples.
 func (a *application) collectListRows(previous *cpuSample) ([]listRow, error) {
 	rows, _, err := a.collectListRowsWithSample(previous)
 	return rows, err
@@ -149,13 +146,6 @@ func (a *application) collectListRowsWithSample(previous *cpuSample) ([]listRow,
 	}
 	states := a.readUnitStates(units)
 	sample := newCPUSample(states)
-	if previous == nil && anyActive(states) {
-		first := sample
-		a.pause(cpuSampleInterval)
-		states = a.readUnitStates(units)
-		sample = newCPUSample(states)
-		previous = first
-	}
 	scheduleStates := a.readScheduleStates(names)
 	health := a.readHealthStates(names)
 	bootUptime := readBootUptime()
@@ -163,6 +153,9 @@ func (a *application) collectListRowsWithSample(previous *cpuSample) ([]listRow,
 	for _, item := range entries {
 		state := states[item.unit]
 		cpu := cpuPercent(previous, sample, item.unit, state)
+		if previous == nil {
+			cpu = averageCPUPercent(bootUptime, state)
+		}
 		if scheduleState, ok := scheduleStates[item.name]; ok && item.instance == nil {
 			state.active = scheduleState.active
 			state.sub = scheduleState.sub
@@ -205,15 +198,6 @@ func newCPUSample(states map[string]serviceState) *cpuSample {
 	return sample
 }
 
-func anyActive(states map[string]serviceState) bool {
-	for _, state := range states {
-		if state.active == "active" {
-			return true
-		}
-	}
-	return false
-}
-
 // cpuPercent returns the CPU usage between two samples, where 100 means one
 // fully used core. It returns nil when usage cannot be computed.
 func cpuPercent(previous, current *cpuSample, unit string, state serviceState) *float64 {
@@ -230,6 +214,28 @@ func cpuPercent(previous, current *cpuSample, unit string, state serviceState) *
 	if after > before {
 		value = float64(after-before) / float64(elapsed.Nanoseconds()) * 100
 	}
+	value = float64(int64(value*10+0.5)) / 10
+	return &value
+}
+
+// averageCPUPercent returns CPU usage averaged over the current activation.
+// It lets one-shot listings remain useful without blocking for a second sample.
+func averageCPUPercent(bootUptime time.Duration, state serviceState) *float64 {
+	if state.active != "active" {
+		return nil
+	}
+	usage, err := strconv.ParseUint(state.cpuNSec, 10, 64)
+	if err != nil {
+		return nil
+	}
+	if bootUptime <= 0 || state.activeSince == 0 {
+		return nil
+	}
+	uptime := bootUptime - time.Duration(state.activeSince)*time.Microsecond
+	if uptime <= 0 {
+		return nil
+	}
+	value := float64(usage) / float64(uptime.Nanoseconds()) * 100
 	value = float64(int64(value*10+0.5)) / 10
 	return &value
 }

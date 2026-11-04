@@ -339,7 +339,7 @@ func TestRestartStopsCompanionTimersBeforeService(t *testing.T) {
 	}
 }
 
-func TestListQueriesAllUnitsAtOnce(t *testing.T) {
+func TestListQueriesAllUnitsOnce(t *testing.T) {
 	directory := localTempDir(t)
 	for _, name := range []string{"api", "worker"} {
 		if err := os.WriteFile(filepath.Join(directory, unitName(name)), []byte("unit"), 0o644); err != nil {
@@ -353,12 +353,14 @@ func TestListQueriesAllUnitsAtOnce(t *testing.T) {
 		return []byte("Id=spm-api.service\nActiveState=active\nSubState=running\nMainPID=10\nMemoryCurrent=1048576\nNRestarts=2\nUnitFileState=enabled\nActiveEnterTimestampMonotonic=1000000\n\nId=spm-worker.service\nActiveState=inactive\nSubState=dead\nMainPID=0\nMemoryCurrent=[not set]\nNRestarts=0\nUnitFileState=disabled\nActiveEnterTimestampMonotonic=0\n"), nil
 	}}
 	var output strings.Builder
-	a := &application{runner: runner, stdout: &output, stderr: io.Discard, unitDir: directory, sleep: func(time.Duration) {}}
+	a := &application{runner: runner, stdout: &output, stderr: io.Discard, unitDir: directory, sleep: func(duration time.Duration) {
+		t.Fatalf("list unexpectedly slept for %s", duration)
+	}}
 	if err := a.list(); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 2 || callsString(runner.calls[:1]) != callsString(runner.calls[1:]) {
-		t.Fatalf("systemctl calls = %d, want one batched query per CPU sample:\n%s", len(runner.calls), callsString(runner.calls))
+	if len(runner.calls) != 1 {
+		t.Fatalf("systemctl calls = %d, want one batched query:\n%s", len(runner.calls), callsString(runner.calls))
 	}
 	for _, want := range []string{"RESTARTS", "ENABLED", "CPU", "api", "2", "enabled", "worker", "disabled"} {
 		if !strings.Contains(output.String(), want) {

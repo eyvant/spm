@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -221,22 +222,15 @@ func TestForceReplacesTemplateWithPlainService(t *testing.T) {
 	}
 }
 
-func TestListJSONIncludesInstancesAndCPU(t *testing.T) {
-	samples := 0
+func TestListJSONIncludesInstancesAndMetrics(t *testing.T) {
 	runner := &fakeRunner{}
 	a, output := newTestApplication(t, runner)
 	startInstances(t, a, "2")
-	a.sleep = func(time.Duration) { time.Sleep(2 * time.Millisecond) }
 	runner.runFunc = func(name string, args ...string) ([]byte, error) {
 		if name != "systemctl" || len(args) < 2 || args[1] != "show" {
 			return nil, nil
 		}
-		samples++
-		cpu := "1000000"
-		if samples > 1 {
-			cpu = "251000000"
-		}
-		return []byte("Id=spm-api@0.service\nActiveState=active\nSubState=running\nMainPID=42\nMemoryCurrent=2048\nCPUUsageNSec=" + cpu + "\nNRestarts=1\nUnitFileState=enabled\n\nId=spm-api@1.service\nActiveState=failed\nSubState=failed\nMainPID=0\nMemoryCurrent=[not set]\nCPUUsageNSec=[not set]\nNRestarts=0\nUnitFileState=enabled\n"), nil
+		return []byte("Id=spm-api@0.service\nActiveState=active\nSubState=running\nMainPID=42\nMemoryCurrent=2048\nCPUUsageNSec=251000000\nNRestarts=1\nUnitFileState=enabled\n\nId=spm-api@1.service\nActiveState=failed\nSubState=failed\nMainPID=0\nMemoryCurrent=[not set]\nCPUUsageNSec=[not set]\nNRestarts=0\nUnitFileState=enabled\n"), nil
 	}
 	options, err := parseList([]string{"--json"})
 	if err != nil {
@@ -251,9 +245,6 @@ func TestListJSONIncludesInstancesAndCPU(t *testing.T) {
 	}
 	if len(rows) != 2 || rows[0].Instance == nil || *rows[0].Instance != 0 || rows[0].PID != 42 || rows[0].MemoryBytes == nil || *rows[0].MemoryBytes != 2048 {
 		t.Fatalf("unexpected rows: %+v", rows)
-	}
-	if rows[0].CPUPercent == nil || *rows[0].CPUPercent <= 0 {
-		t.Fatalf("CPU percent was not computed: %+v", rows[0])
 	}
 	if rows[1].CPUPercent != nil || rows[1].MemoryBytes != nil || rows[1].Status != "failed" {
 		t.Fatalf("failed instance row: %+v", rows[1])
@@ -292,6 +283,22 @@ func TestCPUPercent(t *testing.T) {
 	}
 	if cpuPercent(previous, current, "a", serviceState{active: "inactive"}) != nil {
 		t.Fatal("inactive unit should not report CPU")
+	}
+}
+
+func TestAverageCPUPercent(t *testing.T) {
+	state := serviceState{
+		active:      "active",
+		cpuNSec:     strconv.FormatInt(int64(3*time.Second), 10),
+		activeSince: uint64((7 * time.Second) / time.Microsecond),
+	}
+	got := averageCPUPercent(10*time.Second, state)
+	if got == nil || *got != 100 {
+		t.Fatalf("averageCPUPercent() = %v, want 100", got)
+	}
+	state.active = "inactive"
+	if averageCPUPercent(10*time.Second, state) != nil {
+		t.Fatal("inactive unit should not report average CPU")
 	}
 }
 
