@@ -422,10 +422,22 @@ func (b *darwinBackend) writePlist(config darwinServiceConfig) error {
 	case "on-success":
 		builder.WriteString("  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <true/>\n  </dict>\n")
 	}
-	if delay, err := time.ParseDuration(config.RestartSec); err == nil && delay >= time.Second {
-		builder.WriteString("  <key>ThrottleInterval</key>\n")
-		fmt.Fprintf(&builder, "  <integer>%d</integer>\n", int(delay/time.Second))
+	// launchd defaults ThrottleInterval to 10 seconds. macOS 26 applies that
+	// throttle to explicit kickstart operations as well, so short-lived and
+	// restart=no services can otherwise appear to hang after start/restart.
+	// Keep manual lifecycle operations responsive while preserving the requested
+	// backoff for services that launchd automatically restarts.
+	throttleSeconds := 1
+	if config.Restart != "no" {
+		if delay, err := time.ParseDuration(config.RestartSec); err == nil && delay > 0 {
+			throttleSeconds = int((delay + time.Second - 1) / time.Second)
+			if throttleSeconds < 1 {
+				throttleSeconds = 1
+			}
+		}
 	}
+	builder.WriteString("  <key>ThrottleInterval</key>\n")
+	fmt.Fprintf(&builder, "  <integer>%d</integer>\n", throttleSeconds)
 	if len(env) > 0 {
 		builder.WriteString("  <key>EnvironmentVariables</key>\n  <dict>\n")
 		keys := make([]string, 0, len(env))

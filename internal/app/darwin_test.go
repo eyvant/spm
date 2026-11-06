@@ -57,6 +57,25 @@ func TestDarwinXMLAndRestartPolicies(t *testing.T) {
 		if policy == "no" && strings.Contains(string(data), "<key>KeepAlive</key>") {
 			t.Fatalf("no policy unexpectedly has KeepAlive: %s", data)
 		}
+		if policy == "no" && !strings.Contains(string(data), "<key>ThrottleInterval</key>\n  <integer>1</integer>") {
+			t.Fatalf("no policy should use a one-second launchd throttle: %s", data)
+		}
+	}
+}
+
+func TestDarwinThrottleRoundsRestartDelayUp(t *testing.T) {
+	directory := t.TempDir()
+	b := &darwinBackend{root: directory, plistDir: directory, uid: os.Getuid()}
+	config := darwinServiceConfig{Version: 1, Name: "worker", Cwd: directory, Command: []string{"/usr/bin/true"}, Restart: "always", RestartSec: "1500ms"}
+	if err := b.writePlist(config); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(b.servicePlistPath(config.Name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "<key>ThrottleInterval</key>\n  <integer>2</integer>") {
+		t.Fatalf("restart delay should round up to whole seconds: %s", data)
 	}
 }
 
