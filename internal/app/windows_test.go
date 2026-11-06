@@ -90,7 +90,7 @@ func TestRenderWindowsDaemonExecutorHasNoPollingTrigger(t *testing.T) {
 
 func TestRenderWindowsScheduleDaemonStartsAtScopeActivation(t *testing.T) {
 	userXML := renderWindowsScheduleDaemonTask(`C:\data\scheduler.vbs`, "S-1-5-21-1", "InteractiveToken", false)
-	if !strings.Contains(userXML, "<LogonTrigger>") || !strings.Contains(userXML, "<RestartOnFailure>") {
+	if strings.Contains(userXML, "<LogonTrigger>") || !strings.Contains(userXML, "<Triggers></Triggers>") || !strings.Contains(userXML, "<RestartOnFailure>") {
 		t.Fatalf("unexpected user scheduler XML:\n%s", userXML)
 	}
 	systemXML := renderWindowsScheduleDaemonTask(`C:\data\scheduler.vbs`, "S-1-5-18", "", true)

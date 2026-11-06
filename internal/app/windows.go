@@ -1165,7 +1165,7 @@ func (b *windowsBackend) registerUserStartup(name, executable string) error {
 	}
 	arguments := "__windows-launch --root " + windowsQuoteCommand(b.root) + " " + windowsQuoteCommand(name)
 	cmd := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", windowsCreateShortcutScript)
-	cmd.Env = append(os.Environ(), "SPM_SHORTCUT_PATH="+b.startupPath(name), "SPM_SHORTCUT_TARGET="+executable, "SPM_SHORTCUT_ARGS="+arguments)
+	cmd.Env = append(os.Environ(), "SPM_SHORTCUT_PATH="+b.startupPath(name), "SPM_SHORTCUT_TARGET="+executable, "SPM_SHORTCUT_ARGS="+arguments, "SPM_SHORTCUT_DESCRIPTION=Start an spm user service at logon")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("create user logon shortcut: %s: %w", strings.TrimSpace(string(output)), err)
@@ -1180,7 +1180,7 @@ $shortcut.TargetPath = $env:SPM_SHORTCUT_TARGET
 $shortcut.Arguments = $env:SPM_SHORTCUT_ARGS
 $shortcut.WorkingDirectory = Split-Path -Parent $env:SPM_SHORTCUT_TARGET
 $shortcut.WindowStyle = 7
-$shortcut.Description = 'Start an spm user service at logon'
+$shortcut.Description = $env:SPM_SHORTCUT_DESCRIPTION
 $shortcut.Save()
 `
 

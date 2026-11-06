@@ -258,6 +258,13 @@ $accountLine
     if ($schedulerXml -notmatch 'scheduler.vbs' -or $schedulerXml -notmatch '<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>') {
         throw "Unexpected scheduler task XML: $schedulerXml"
     }
+    if ($system) {
+        if ($schedulerXml -notmatch '<BootTrigger>') { throw "System scheduler is missing its boot trigger: $schedulerXml" }
+    } else {
+        if ($schedulerXml -match '<LogonTrigger>') { throw "User scheduler should use the Startup shortcut, not a privileged logon trigger: $schedulerXml" }
+        $schedulerShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\spm-schedule-daemon.lnk'
+        if (-not (Test-Path -LiteralPath $schedulerShortcut)) { throw "User scheduler Startup shortcut is missing: $schedulerShortcut" }
+    }
     try {
         Wait-File $scheduleMarker 100
     } catch {
