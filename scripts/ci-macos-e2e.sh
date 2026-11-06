@@ -82,7 +82,9 @@ wait_log() {
 
 start_args=(start --name "$MAIN" --no-enable --restart no --cwd /tmp)
 [[ $SCOPE == system ]] && start_args+=(--user root --group wheel)
-start_args+=(-- /bin/sh -c "echo $MARKER; exec /bin/sleep 300")
+# Keep fixtures alive long enough for assertions without making macOS 26 wait
+# five minutes when launchd defers process teardown.
+start_args+=(-- /bin/sh -c "echo $MARKER; exec /bin/sleep 60")
 command_spm "${start_args[@]}"
 wait_running "$MAIN"
 wait_log "$MAIN" "$MARKER"
@@ -101,11 +103,11 @@ test ! -e "$PLIST_DIR/com.eyvant.spm.$MAIN.plist"
 command_spm run "$MAIN"
 wait_running "$MAIN"
 
-dependency_args=(start --name "$DEPENDENCY" --no-enable --restart no -- /bin/sleep 300)
-dependent_args=(start --name "$DEPENDENT" --no-enable --restart no --requires "$DEPENDENCY" --after "$DEPENDENCY" -- /bin/sleep 300)
+dependency_args=(start --name "$DEPENDENCY" --no-enable --restart no -- /bin/sleep 60)
+dependent_args=(start --name "$DEPENDENT" --no-enable --restart no --requires "$DEPENDENCY" --after "$DEPENDENCY" -- /bin/sleep 60)
 if [[ $SCOPE == system ]]; then
-  dependency_args=(start --name "$DEPENDENCY" --no-enable --restart no --user root --group wheel -- /bin/sleep 300)
-  dependent_args=(start --name "$DEPENDENT" --no-enable --restart no --user root --group wheel --requires "$DEPENDENCY" --after "$DEPENDENCY" -- /bin/sleep 300)
+  dependency_args=(start --name "$DEPENDENCY" --no-enable --restart no --user root --group wheel -- /bin/sleep 60)
+  dependent_args=(start --name "$DEPENDENT" --no-enable --restart no --user root --group wheel --requires "$DEPENDENCY" --after "$DEPENDENCY" -- /bin/sleep 60)
 fi
 command_spm "${dependency_args[@]}"
 command_spm stop "$DEPENDENCY"
@@ -129,7 +131,7 @@ cat >"$TOML" <<EOF
 schema = 1
 [[services]]
 name = "$DECLARED"
-command = ["/bin/sleep", "300"]
+command = ["/bin/sleep", "60"]
 restart = "no"
 enable = false
 [services.macos]
