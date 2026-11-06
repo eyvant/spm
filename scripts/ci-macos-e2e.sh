@@ -158,7 +158,7 @@ test -f "$SCHEDULER_PLIST"
 grep -F '__darwin-schedule-daemon' "$SCHEDULER_PLIST"
 grep -F '<key>KeepAlive</key>' "$SCHEDULER_PLIST"
 command_spm native launchd print "$SCHEDULE" | grep -F "com.eyvant.spm.$SCHEDULE"
-for _ in {1..100}; do
+for _ in {1..30}; do
   [[ -s $SCHEDULE_MARKER ]] && break
   sleep 1
 done
