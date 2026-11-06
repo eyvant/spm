@@ -200,6 +200,68 @@ func TestApplyDryRunDoesNotWriteUnits(t *testing.T) {
 	}
 }
 
+func TestInspectDeclarationValidateDiffAndUpdate(t *testing.T) {
+	directory := localTempDir(t)
+	path := filepath.Join(directory, "spm.toml")
+	write := func(description string) {
+		data := "[[services]]\nname = \"api\"\ncommand = [\"go\", \"version\"]\nrestart_sec = \"4s\"\n"
+		if description != "" {
+			data += "description = \"" + description + "\"\n"
+		}
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("")
+	var output strings.Builder
+	a := &application{runner: &fakeRunner{}, stdout: &output, stderr: io.Discard, unitDir: directory, configDir: filepath.Join(directory, "config")}
+	if err := a.inspectDeclaration("validate", []string{path}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "is valid") {
+		t.Fatalf("validate output = %q", output.String())
+	}
+	output.Reset()
+	if err := a.inspectDeclaration("diff", []string{path}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "create\tapi") {
+		t.Fatalf("create diff = %q", output.String())
+	}
+	if err := a.apply([]string{path}); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := a.inspectDeclaration("diff", []string{path}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "unchanged\tapi") {
+		t.Fatalf("unchanged diff = %q", output.String())
+	}
+	write("updated")
+	output.Reset()
+	if err := a.inspectDeclaration("diff", []string{path}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "update\tapi") || !strings.Contains(output.String(), "+  description = \"updated\"") {
+		t.Fatalf("update diff = %q", output.String())
+	}
+	for _, args := range [][]string{nil, {path, path}} {
+		if err := a.inspectDeclaration("validate", args); err == nil {
+			t.Errorf("inspectDeclaration(%v) unexpectedly succeeded", args)
+		}
+	}
+}
+
+func TestApplyArgumentErrors(t *testing.T) {
+	a := &application{stdout: io.Discard, stderr: io.Discard}
+	for _, args := range [][]string{nil, {"--unknown"}, {"one.toml", "two.toml"}} {
+		if err := a.apply(args); err == nil {
+			t.Errorf("apply(%v) unexpectedly succeeded", args)
+		}
+	}
+}
+
 func containsAll(value string, parts ...string) bool {
 	for _, part := range parts {
 		if !strings.Contains(value, part) {

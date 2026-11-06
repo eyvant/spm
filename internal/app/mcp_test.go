@@ -104,3 +104,73 @@ func TestMCPRunCLIRejectsInteractiveAndUnboundedCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestMCPProtocolErrors(t *testing.T) {
+	input := strings.Join([]string{
+		`{not-json}`,
+		`{"jsonrpc":"1.0","id":1,"method":"ping"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"missing"}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":3}}`,
+	}, "\n")
+	var output bytes.Buffer
+	if err := serveMCP(strings.NewReader(input), &output); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("got %d responses, want 4: %s", len(lines), output.String())
+	}
+	wantCodes := []int{-32700, -32600, -32601, -32602}
+	for i, line := range lines {
+		var response struct {
+			Error struct {
+				Code int `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(line), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Error.Code != wantCodes[i] {
+			t.Errorf("response %d code = %d, want %d", i, response.Error.Code, wantCodes[i])
+		}
+	}
+}
+
+func TestDecodeMCPArgumentsRejectsTrailingData(t *testing.T) {
+	var args mcpNameArgs
+	if err := decodeMCPArguments(json.RawMessage(`{"name":"api"} {}`), &args); err == nil || !strings.Contains(err.Error(), "unexpected data") {
+		t.Fatalf("decodeMCPArguments() error = %v", err)
+	}
+	if err := decodeMCPArguments(nil, &args); err != nil {
+		t.Fatalf("empty arguments should decode as an empty object: %v", err)
+	}
+}
+
+func TestMCPFocusedToolValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{"spm_create_service", `{}`},
+		{"spm_get_logs", `{"lines":1001}`},
+		{"spm_show_service", `{"name":"api"} {}`},
+		{"missing", `{}`},
+	}
+	for _, test := range tests {
+		result := callSPMTool(test.name, json.RawMessage(test.raw))
+		if result["isError"] != true {
+			t.Errorf("%s(%s) was not rejected: %#v", test.name, test.raw, result)
+		}
+	}
+}
+
+func FuzzDecodeMCPArguments(f *testing.F) {
+	for _, seed := range []string{`{}`, `null`, `{"name":"api","system":true}`, `{"unknown":1}`, `{`} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, input string) {
+		var args mcpNameArgs
+		// JSON received over stdio is untrusted and must never panic the server.
+		_ = decodeMCPArguments(json.RawMessage(input), &args)
+	})
+}

@@ -1226,21 +1226,6 @@ func (a *application) readState(name string) serviceState {
 	return a.readUnitStates([]string{unitName(name)})[unitName(name)]
 }
 
-func (a *application) readStates(names []string) map[string]serviceState {
-	units := make([]string, len(names))
-	for i, name := range names {
-		units[i] = unitName(name)
-	}
-	unitStates := a.readUnitStates(units)
-	states := make(map[string]serviceState, len(names))
-	for _, name := range names {
-		if state, ok := unitStates[unitName(name)]; ok {
-			states[name] = state
-		}
-	}
-	return states
-}
-
 // readUnitStates reads the runtime state of service units with one
 // systemctl call, keyed by unit name.
 func (a *application) readUnitStates(units []string) map[string]serviceState {

@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -465,5 +466,91 @@ func TestShowUsesSummaryWhileStatusUsesSystemctlStatus(t *testing.T) {
 	}
 	if got := callsString(runner.calls); !strings.Contains(got, "systemctl --user status") {
 		t.Fatalf("status did not call systemctl status:\n%s", got)
+	}
+}
+
+func TestPublicRunGlobalDispatch(t *testing.T) {
+	root := localTempDir(t)
+	t.Setenv("SPM_WINDOWS_DATA_DIR", root)
+	t.Setenv("APPDATA", filepath.Join(root, "appdata"))
+	tests := []struct {
+		name string
+		args []string
+		err  string
+		out  string
+	}{
+		{"no args", nil, "", "Usage:"},
+		{"help", []string{"help"}, "", "Usage:"},
+		{"global help", []string{"--help"}, "", "Usage:"},
+		{"command help", []string{"help", "start"}, "", "spm start"},
+		{"inline command help", []string{"start", "--help"}, "", "spm start"},
+		{"version", []string{"version"}, "", "spm "},
+		{"short version", []string{"-v"}, "", "spm "},
+		{"version help", []string{"version", "--help"}, "", "spm version"},
+		{"completion help", []string{"completion", "--help"}, "", "completion"},
+		{"powershell completion", []string{"completion", "powershell"}, "", "Register-ArgumentCompleter"},
+		{"list", []string{"list", "--json"}, "", "[]"},
+		{"mcp arguments", []string{"mcp", "extra"}, "does not accept", ""},
+		{"help arguments", []string{"help", "start", "extra"}, "at most one", ""},
+		{"global help arguments", []string{"--help", "extra"}, "does not accept", ""},
+		{"version arguments", []string{"version", "extra"}, "does not accept", ""},
+		{"health probe arguments", []string{"health-probe"}, "requires TYPE TARGET", ""},
+		{"scheduled run arguments", []string{"__scheduled-run"}, "requires", ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			err := Run(test.args, &output, io.Discard)
+			if test.err == "" {
+				if err != nil {
+					t.Fatalf("Run(%v): %v", test.args, err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), test.err) {
+				t.Fatalf("Run(%v) error = %v, want %q", test.args, err, test.err)
+			}
+			if test.out != "" && !strings.Contains(output.String(), test.out) {
+				t.Fatalf("Run(%v) output missing %q:\n%s", test.args, test.out, output.String())
+			}
+		})
+	}
+}
+
+func TestExecRunnerAndCommandErrors(t *testing.T) {
+	runner := execRunner{}
+	output, err := runner.Run("cmd.exe", "/d", "/c", "echo hello")
+	if err != nil || !strings.Contains(string(output), "hello") {
+		t.Fatalf("exec runner output = %q, %v", output, err)
+	}
+	if _, err := runner.Run("cmd.exe", "/d", "/c", "echo failure & exit /b 7"); err == nil || !strings.Contains(err.Error(), "failure") {
+		t.Fatalf("exec runner failure = %v", err)
+	}
+	var interactive bytes.Buffer
+	if err := runner.Interactive(strings.NewReader(""), &interactive, io.Discard, "cmd.exe", "/d", "/c", "echo interactive"); err != nil || !strings.Contains(interactive.String(), "interactive") {
+		t.Fatalf("interactive runner output = %q, %v", interactive.String(), err)
+	}
+	base := errors.New("exit")
+	for _, test := range []struct {
+		message string
+		want    string
+	}{
+		{"Failed to connect to bus", "systemd manager"},
+		{"XDG_RUNTIME_DIR is missing", "systemd manager"},
+		{"No journal files were found", "journal storage"},
+		{"permission denied reading journal", "journal storage"},
+		{"plain failure", "plain failure"},
+	} {
+		if got := commandError(test.message, base); !strings.Contains(got.Error(), test.want) || !errors.Is(got, base) {
+			t.Errorf("commandError(%q) = %v", test.message, got)
+		}
+	}
+	if got := commandError("", base); got != base {
+		t.Fatalf("empty command error = %v", got)
+	}
+	var notices bytes.Buffer
+	a := &application{stderr: &notices}
+	a.warn("careful %d", 1)
+	a.hint("try %s", "again")
+	if !strings.Contains(notices.String(), "Warning: careful 1") || !strings.Contains(notices.String(), "Hint: try again") {
+		t.Fatalf("notices = %q", notices.String())
 	}
 }

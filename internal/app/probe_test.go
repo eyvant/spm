@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +10,14 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
+
+type probeRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f probeRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
 
 func TestProbeValidation(t *testing.T) {
 	probe := probeConfig{Kind: "http", Target: "http://127.0.0.1:3000/health", Timeout: "1s", Retries: 1}
@@ -18,6 +26,97 @@ func TestProbeValidation(t *testing.T) {
 	}
 	if err := (probeConfig{Kind: "invalid", Target: "target"}).validate(); err == nil {
 		t.Fatal("invalid probe kind unexpectedly succeeded")
+	}
+}
+
+func TestProbeValidationRejectsInvalidConfiguration(t *testing.T) {
+	tests := []struct {
+		name  string
+		probe probeConfig
+	}{
+		{"zero timeout", probeConfig{Kind: "http", Target: "http://localhost", Timeout: "0s"}},
+		{"negative retries", probeConfig{Kind: "tcp", Target: "localhost:1", Retries: -1}},
+		{"negative delay", probeConfig{Kind: "command", Target: "true", RetryDelay: "-1s"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.probe.validate(); err == nil {
+				t.Fatalf("%#v unexpectedly validated", test.probe)
+			}
+		})
+	}
+
+	var probe probeConfig
+	if err := probe.setTarget("http", ""); err == nil {
+		t.Fatal("empty target unexpectedly accepted")
+	}
+	if err := probe.setTarget("http", "http://localhost\ninvalid"); err == nil {
+		t.Fatal("newline in target unexpectedly accepted")
+	}
+	if err := probe.setTarget("http", "http://localhost"); err != nil {
+		t.Fatal(err)
+	}
+	if err := probe.setTarget("tcp", "localhost:80"); err == nil {
+		t.Fatal("multiple probe types unexpectedly accepted")
+	}
+}
+
+func TestHealthValidationAndDefaults(t *testing.T) {
+	if err := (healthConfig{Interval: "1s"}).validate(); err == nil {
+		t.Fatal("health options without a probe unexpectedly validated")
+	}
+	for _, health := range []healthConfig{
+		{Probe: probeConfig{Kind: "http", Target: "http://localhost"}, Interval: "bad"},
+		{Probe: probeConfig{Kind: "tcp", Target: "localhost:80"}, StartPeriod: "0s"},
+		{Probe: probeConfig{Kind: "command", Target: "true"}, Action: "reboot"},
+	} {
+		if err := health.validate(); err == nil {
+			t.Fatalf("%#v unexpectedly validated", health)
+		}
+	}
+	normalized := (probeConfig{}).normalized()
+	if normalized.Timeout != "5s" || normalized.Retries != 3 || normalized.RetryDelay != "1s" {
+		t.Fatalf("unexpected defaults: %#v", normalized)
+	}
+}
+
+func TestRunProbeOnceHTTPAndTCP(t *testing.T) {
+	originalClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		status := http.StatusNoContent
+		if request.URL.Path == "/fail" {
+			status = http.StatusServiceUnavailable
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+	})}
+	t.Cleanup(func() { http.DefaultClient = originalClient })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := runProbeOnce(ctx, probeConfig{Kind: "http", Target: "http://health.local/ok"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runProbeOnce(ctx, probeConfig{Kind: "http", Target: "http://health.local/fail"}); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("HTTP failure error = %v", err)
+	}
+	if err := runProbeOnce(ctx, probeConfig{Kind: "tcp", Target: "127.0.0.1:0"}); err == nil {
+		t.Fatal("TCP connection to port zero unexpectedly succeeded")
+	}
+	if err := runProbeOnce(ctx, probeConfig{Kind: "unknown", Target: "target"}); err == nil {
+		t.Fatal("unsupported probe unexpectedly succeeded")
+	}
+}
+
+func TestHealthProbeCLIRejectsMalformedArguments(t *testing.T) {
+	a := &application{}
+	for _, args := range [][]string{
+		nil,
+		{"http", "http://localhost", "--timeout"},
+		{"http", "http://localhost", "--unknown", "value"},
+		{"http", "http://localhost", "--retries", "invalid"},
+	} {
+		if err := a.healthProbeCLI(args); err == nil {
+			t.Errorf("arguments %v unexpectedly succeeded", args)
+		}
 	}
 }
 

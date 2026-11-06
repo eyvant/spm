@@ -178,7 +178,11 @@ func (a *application) healthProbeCLI(args []string) error {
 		case "--timeout":
 			probe.Timeout = args[i+1]
 		case "--retries":
-			probe.Retries, _ = strconv.Atoi(args[i+1])
+			var err error
+			probe.Retries, err = strconv.Atoi(args[i+1])
+			if err != nil || probe.Retries < 1 {
+				return fmt.Errorf("invalid probe retries %q", args[i+1])
+			}
 		case "--retry-delay":
 			probe.RetryDelay = args[i+1]
 		default:

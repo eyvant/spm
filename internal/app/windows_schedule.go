@@ -266,7 +266,7 @@ func (b *windowsBackend) createScheduledTask(name, xml string) error {
 		return err
 	}
 	// schtasks expects UTF-16 when the XML declaration says UTF-16.
-	for _, value := range []rune(xml) {
+	for _, value := range xml {
 		encoded := utf16.Encode([]rune{value})
 		for _, unit := range encoded {
 			if _, err := file.Write([]byte{byte(unit), byte(unit >> 8)}); err != nil {

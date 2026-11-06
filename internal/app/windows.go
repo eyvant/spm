@@ -548,7 +548,7 @@ func rejectWindowsStartOptions(o startOptions) error {
 		}
 	}
 	if len(unsupported) > 0 {
-		return fmt.Errorf("Windows backend does not support %s", strings.Join(unsupported, ", "))
+		return fmt.Errorf("windows backend does not support %s", strings.Join(unsupported, ", "))
 	}
 	return nil
 }
@@ -1408,7 +1408,7 @@ func (b *windowsBackend) logs(args []string) error {
 		return err
 	}
 	if options.since != "" || options.until != "" || options.output != "" || options.boot || options.health {
-		return errors.New("Windows logs currently support service names, --lines, --follow, and --grep")
+		return errors.New("windows logs currently support service names, --lines, --follow, and --grep")
 	}
 	names := options.names
 	if len(names) == 0 || len(names) == 1 && names[0] == "all" {
@@ -1569,7 +1569,7 @@ func (b *windowsBackend) doctor() error {
 		check("spm executable", "OK", executable)
 	}
 	if failed {
-		return errors.New("Windows doctor found failures")
+		return errors.New("windows doctor found failures")
 	}
 	return nil
 }

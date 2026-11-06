@@ -21,7 +21,7 @@ SCHEDULE_MARKER=${RUNNER_TEMP:-/tmp}/$PREFIX-schedule-marker.log
 SCHEDULE_TOML=${RUNNER_TEMP:-/tmp}/$PREFIX-schedule.toml
 
 if [[ $SCOPE == system ]]; then
-  command_spm() { sudo "$SPM" --system "$@"; }
+  command_spm() { sudo --preserve-env=GOCOVERDIR "$SPM" --system "$@"; }
   PLIST_DIR=/Library/LaunchDaemons
   DATA_ROOT='/Library/Application Support/spm'
 else

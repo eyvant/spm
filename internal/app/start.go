@@ -1621,10 +1621,6 @@ func resolveExecutable(name string) (string, error) {
 	return resolveExecutableFromPath(name, "", "")
 }
 
-func resolveExecutableFrom(name, cwd string) (string, error) {
-	return resolveExecutableFromPath(name, cwd, "")
-}
-
 func resolveExecutableFromPath(name, cwd, searchPath string) (string, error) {
 	if strings.ContainsRune(name, filepath.Separator) {
 		path := name

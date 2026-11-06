@@ -8,5 +8,5 @@ import (
 )
 
 func runWindows(_ []string, _, _ io.Writer, _ bool) error {
-	return errors.New("Windows backend is unavailable in this build")
+	return errors.New("windows backend is unavailable in this build")
 }

@@ -61,3 +61,20 @@ func TestRenderSystemCronRestartUnit(t *testing.T) {
 		t.Fatalf("system restart service contains --user:\n%s", service)
 	}
 }
+
+func FuzzParseCronExpression(f *testing.F) {
+	for _, seed := range []string{
+		"* * * * *",
+		"*/5 9-17 * * 1-5",
+		"30 0 4 * * *",
+		"0 0 29 2 *",
+		"",
+		"not a cron expression",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, expression string) {
+		// Arbitrary user input must be rejected cleanly rather than panicking.
+		_, _ = parseCronExpression(expression)
+	})
+}

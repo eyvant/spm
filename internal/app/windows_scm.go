@@ -196,7 +196,7 @@ try {
 	}
 	password := output.String()
 	if password == "" {
-		return "", errors.New("Windows service account password cannot be empty")
+		return "", errors.New("windows service account password cannot be empty")
 	}
 	return password, nil
 }
@@ -258,7 +258,7 @@ func (b *windowsBackend) startSCMService(name string) error {
 			return b.waitRunning(name, 10*time.Second)
 		}
 		if status.State == svc.Stopped {
-			return fmt.Errorf("Windows service %s stopped during startup (win32=%d, service=%d)", b.scmName(name), status.Win32ExitCode, status.ServiceSpecificExitCode)
+			return fmt.Errorf("windows service %s stopped during startup (win32=%d, service=%d)", b.scmName(name), status.Win32ExitCode, status.ServiceSpecificExitCode)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
