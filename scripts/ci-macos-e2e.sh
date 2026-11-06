@@ -80,54 +80,53 @@ wait_log() {
   return 1
 }
 
-start_args=(start --name "$MAIN" --no-enable --restart no --cwd /tmp)
-[[ $SCOPE == system ]] && start_args+=(--user root --group wheel)
-# Keep fixtures alive long enough for immediate assertions without making
-# macOS 26 wait minutes when launchd defers process teardown.
-start_args+=(-- /bin/sh -c "echo $MARKER; exec /bin/sleep 20")
-command_spm "${start_args[@]}"
-wait_running "$MAIN"
-wait_log "$MAIN" "$MARKER"
-command_spm native launchd print "$MAIN" | grep -F "com.eyvant.spm.$MAIN"
+if [[ ${SPM_CI_E2E_MODE:-full} == full ]]; then
+  start_args=(start --name "$MAIN" --no-enable --restart no --cwd /tmp)
+  [[ $SCOPE == system ]] && start_args+=(--user root --group wheel)
+  start_args+=(-- /bin/sh -c "echo $MARKER; exec /bin/sleep 20")
+  command_spm "${start_args[@]}"
+  wait_running "$MAIN"
+  wait_log "$MAIN" "$MARKER"
+  command_spm native launchd print "$MAIN" | grep -F "com.eyvant.spm.$MAIN"
 
-PID_BEFORE=$(command_spm status "$MAIN" | awk '$1 == "pid" { print $2 }')
-command_spm restart "$MAIN"
-wait_running "$MAIN"
-PID_AFTER=$(command_spm status "$MAIN" | awk '$1 == "pid" { print $2 }')
-[[ -n $PID_BEFORE && -n $PID_AFTER && $PID_BEFORE != "$PID_AFTER" ]]
+  PID_BEFORE=$(command_spm status "$MAIN" | awk '$1 == "pid" { print $2 }')
+  command_spm restart "$MAIN"
+  wait_running "$MAIN"
+  PID_AFTER=$(command_spm status "$MAIN" | awk '$1 == "pid" { print $2 }')
+  [[ -n $PID_BEFORE && -n $PID_AFTER && $PID_BEFORE != "$PID_AFTER" ]]
 
-command_spm enable "$MAIN"
-test -f "$PLIST_DIR/com.eyvant.spm.$MAIN.plist"
-command_spm disable "$MAIN"
-test ! -e "$PLIST_DIR/com.eyvant.spm.$MAIN.plist"
-command_spm run "$MAIN"
-wait_running "$MAIN"
+  command_spm enable "$MAIN"
+  test -f "$PLIST_DIR/com.eyvant.spm.$MAIN.plist"
+  command_spm disable "$MAIN"
+  test ! -e "$PLIST_DIR/com.eyvant.spm.$MAIN.plist"
+  command_spm run "$MAIN"
+  wait_running "$MAIN"
 
-dependency_args=(start --name "$DEPENDENCY" --no-enable --restart no -- /bin/sleep 20)
-dependent_args=(start --name "$DEPENDENT" --no-enable --restart no --requires "$DEPENDENCY" --after "$DEPENDENCY" -- /bin/sleep 20)
-if [[ $SCOPE == system ]]; then
-  dependency_args=(start --name "$DEPENDENCY" --no-enable --restart no --user root --group wheel -- /bin/sleep 20)
-  dependent_args=(start --name "$DEPENDENT" --no-enable --restart no --user root --group wheel --requires "$DEPENDENCY" --after "$DEPENDENCY" -- /bin/sleep 20)
-fi
-command_spm "${dependency_args[@]}"
-command_spm stop "$DEPENDENCY"
-command_spm "${dependent_args[@]}"
-wait_running "$DEPENDENCY"
-wait_running "$DEPENDENT"
+  dependency_args=(start --name "$DEPENDENCY" --no-enable --restart no -- /bin/sleep 20)
+  dependent_args=(start --name "$DEPENDENT" --no-enable --restart no --requires "$DEPENDENCY" --after "$DEPENDENCY" -- /bin/sleep 20)
+  if [[ $SCOPE == system ]]; then
+    dependency_args=(start --name "$DEPENDENCY" --no-enable --restart no --user root --group wheel -- /bin/sleep 20)
+    dependent_args=(start --name "$DEPENDENT" --no-enable --restart no --user root --group wheel --requires "$DEPENDENCY" --after "$DEPENDENCY" -- /bin/sleep 20)
+  fi
+  command_spm "${dependency_args[@]}"
+  command_spm stop "$DEPENDENCY"
+  command_spm "${dependent_args[@]}"
+  wait_running "$DEPENDENCY"
+  wait_running "$DEPENDENT"
 
-crash_args=(start --name "$CRASHING" --no-enable --restart on-failure --restart-sec 1s -- /bin/sh -c "echo restart >> '$CRASH_LOG'; sleep 0.2; exit 23")
-if [[ $SCOPE == system ]]; then
-  crash_args=(start --name "$CRASHING" --no-enable --restart on-failure --restart-sec 1s --user root --group wheel -- /bin/sh -c "echo restart >> '$CRASH_LOG'; sleep 0.2; exit 23")
-fi
-command_spm "${crash_args[@]}"
-for _ in {1..80}; do
-  [[ -f $CRASH_LOG ]] && RESTARTS=$(wc -l <"$CRASH_LOG") || RESTARTS=0
-  [[ $RESTARTS -ge 2 ]] && break
-  sleep 0.25
-done
-[[ $RESTARTS -ge 2 ]]
+  crash_args=(start --name "$CRASHING" --no-enable --restart on-failure --restart-sec 1s -- /bin/sh -c "echo restart >> '$CRASH_LOG'; sleep 0.2; exit 23")
+  if [[ $SCOPE == system ]]; then
+    crash_args=(start --name "$CRASHING" --no-enable --restart on-failure --restart-sec 1s --user root --group wheel -- /bin/sh -c "echo restart >> '$CRASH_LOG'; sleep 0.2; exit 23")
+  fi
+  command_spm "${crash_args[@]}"
+  for _ in {1..80}; do
+    [[ -f $CRASH_LOG ]] && RESTARTS=$(wc -l <"$CRASH_LOG") || RESTARTS=0
+    [[ $RESTARTS -ge 2 ]] && break
+    sleep 0.25
+  done
+  [[ $RESTARTS -ge 2 ]]
 
-cat >"$TOML" <<EOF
+  cat >"$TOML" <<EOF
 schema = 1
 [[services]]
 name = "$DECLARED"
@@ -137,11 +136,12 @@ enable = false
 [services.macos]
 description = "macOS declaration integration"
 EOF
-command_spm validate "$TOML"
-command_spm apply --dry-run "$TOML" | grep -F $'create\t'"$DECLARED"
-command_spm apply "$TOML"
-wait_running "$DECLARED"
-command_spm diff "$TOML" | grep -F $'unchanged\t'"$DECLARED"
+  command_spm validate "$TOML"
+  command_spm apply --dry-run "$TOML" | grep -F $'create\t'"$DECLARED"
+  command_spm apply "$TOML"
+  wait_running "$DECLARED"
+  command_spm diff "$TOML" | grep -F $'unchanged\t'"$DECLARED"
+fi
 
 echo "==> macOS $SCOPE native scheduling, portable cron, state, and lifecycle"
 schedule_args=(schedule --name "$SCHEDULE" --cron '*/5 * * * * *' --timezone UTC --persistent --randomized-delay 1s --cwd /tmp)

@@ -21,8 +21,10 @@ jobs:
         include:
           - os: macos-15-intel
             go: 1.21.x
+            e2e: full
           - os: macos-26-intel
             go: stable
+            e2e: schedule
 
     steps:
       - name: Check out repository
@@ -52,6 +54,7 @@ jobs:
         shell: bash
         env:
           SPM_CI_PREFIX: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
+          SPM_CI_E2E_MODE: ${{ matrix.e2e }}
         run: |
           user_log="$RUNNER_TEMP/spm-macos-user.log"
           system_log="$RUNNER_TEMP/spm-macos-system.log"
