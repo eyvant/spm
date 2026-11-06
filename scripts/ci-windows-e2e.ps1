@@ -302,7 +302,7 @@ $scheduleAccountLine
 
     Write-Host "==> $Scope scheduled log rotation"
     $rotationBytes = 11MB
-    $rotationArguments = @('schedule', '--name', $rotation, '--on-boot', '1day', '--no-enable')
+    $rotationArguments = @('schedule', '--name', $rotation, '--on-boot', '24h', '--no-enable')
     if ($system) { $rotationArguments += @('--user', 'SYSTEM') }
     $rotationArguments += @('--', $powershell, '-NoProfile', '-NonInteractive', '-Command', "[Console]::Out.Write(('x' * $rotationBytes))")
     Invoke-Spm $rotationArguments | Out-Null

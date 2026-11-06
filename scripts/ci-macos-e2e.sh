@@ -196,7 +196,7 @@ command_spm cat "$SCHEDULE_DECLARED" | grep -F '__scheduled-run'
 command_spm diff "$SCHEDULE_TOML" | grep -F $'unchanged\t'"$SCHEDULE_DECLARED"
 
 echo "==> macOS $SCOPE scheduled log rotation"
-rotation_args=(schedule --name "$ROTATION" --on-boot 1day --no-enable)
+rotation_args=(schedule --name "$ROTATION" --on-boot 24h --no-enable)
 if [[ $SCOPE == system ]]; then
   rotation_args+=(--user root --group wheel)
 fi
