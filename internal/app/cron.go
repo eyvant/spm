@@ -19,29 +19,39 @@ func cronToOnCalendars(expression string) ([]string, error) {
 		return nil, fmt.Errorf("expression cannot contain a newline")
 	}
 	fields := strings.Fields(expression)
-	if len(fields) != 5 {
-		return nil, fmt.Errorf("expected 5 fields, got %d", len(fields))
+	if len(fields) != 5 && len(fields) != 6 {
+		return nil, fmt.Errorf("expected 5 or 6 fields, got %d", len(fields))
 	}
 	if _, err := parseCronExpression(expression); err != nil {
 		return nil, err
 	}
-	minute, err := convertCronField(fields[0], 0, 59, 0)
+	offset := 0
+	second := "00"
+	var err error
+	if len(fields) == 6 {
+		offset = 1
+		second, err = convertCronField(fields[0], 0, 59, 0)
+		if err != nil {
+			return nil, fmt.Errorf("second: %w", err)
+		}
+	}
+	minute, err := convertCronField(fields[offset], 0, 59, 0)
 	if err != nil {
 		return nil, fmt.Errorf("minute: %w", err)
 	}
-	hour, err := convertCronField(fields[1], 0, 23, 0)
+	hour, err := convertCronField(fields[offset+1], 0, 23, 0)
 	if err != nil {
 		return nil, fmt.Errorf("hour: %w", err)
 	}
-	day, err := convertCronField(fields[2], 1, 31, 1)
+	day, err := convertCronField(fields[offset+2], 1, 31, 1)
 	if err != nil {
 		return nil, fmt.Errorf("day of month: %w", err)
 	}
-	month, err := convertCronField(fields[3], 1, 12, 1)
+	month, err := convertCronField(fields[offset+3], 1, 12, 1)
 	if err != nil {
 		return nil, fmt.Errorf("month: %w", err)
 	}
-	weekday, err := convertCronWeekday(fields[4])
+	weekday, err := convertCronWeekday(fields[offset+4])
 	if err != nil {
 		return nil, fmt.Errorf("day of week: %w", err)
 	}
@@ -50,9 +60,9 @@ func cronToOnCalendars(expression string) ([]string, error) {
 		if renderedWeekday != "*" {
 			prefix = renderedWeekday + " "
 		}
-		return fmt.Sprintf("%s*-%s-%s %s:%s:00", prefix, month, renderedDay, hour, minute)
+		return fmt.Sprintf("%s*-%s-%s %s:%s:%s", prefix, month, renderedDay, hour, minute, second)
 	}
-	if fields[2] != "*" && fields[4] != "*" {
+	if fields[offset+2] != "*" && fields[offset+4] != "*" {
 		return []string{render(day, "*"), render("*", weekday)}, nil
 	}
 	return []string{render(day, weekday)}, nil
@@ -205,6 +215,7 @@ func renderCronRestartUnits(name, expression, timezone, calendar, systemctl stri
 		"Description=" + escapeSystemdSpecifiers("Cron restart timer for spm service: "+name) + "\n" +
 		"StartLimitIntervalSec=0\n\n" +
 		"[Timer]\n" +
+		"AccuracySec=1s\n" +
 		"OnCalendar=" + calendar + "\n" +
 		"Unit=" + cronRestartServiceName(name) + "\n\n" +
 		"[Install]\n" +

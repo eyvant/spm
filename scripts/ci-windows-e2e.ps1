@@ -19,8 +19,9 @@ $dependent = "$prefix-$($Scope.ToLowerInvariant())-dependent"
 $declared = "$prefix-$($Scope.ToLowerInvariant())-declared"
 $scheduled = "$prefix-$($Scope.ToLowerInvariant())-scheduled"
 $scheduledDeclared = "$prefix-$($Scope.ToLowerInvariant())-scheduled-declared"
+$rotation = "$prefix-$($Scope.ToLowerInvariant())-log-rotation"
 $crashing = "$prefix-user-crashing"
-$names = @($main, $dependency, $dependent, $declared, $scheduled, $scheduledDeclared, $crashing)
+$names = @($main, $dependency, $dependent, $declared, $scheduled, $scheduledDeclared, $rotation, $crashing)
 $oldData = [Environment]::GetEnvironmentVariable('SPM_WINDOWS_DATA_DIR', 'Process')
 $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { Join-Path $repo '.ci-tmp' }
 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
@@ -217,7 +218,7 @@ $accountLine
     Remove-Item -LiteralPath $scheduleMarker -Force -ErrorAction SilentlyContinue
     $powershell = (Get-Command powershell.exe).Source
     $scheduleArguments = @(
-        'schedule', '--name', $scheduled, '--cron', '* * * * *', '--timezone', 'UTC',
+        'schedule', '--name', $scheduled, '--cron', '*/5 * * * * *', '--timezone', 'UTC',
         '--persistent', '--randomized-delay', '1s', '--cwd', (Split-Path $scheduleMarker)
     )
     # SYSTEM is the canonical non-interactive Task Scheduler principal on
@@ -234,14 +235,29 @@ $accountLine
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
     if ($task.State -eq 'Disabled') { throw "$taskName was unexpectedly disabled" }
     $taskXml = Export-ScheduledTask -TaskName $taskName
-    if ($taskXml -notmatch 'wscript.exe' -or $taskXml -notmatch 'schedule-timer.vbs' -or $taskXml -notmatch '<Interval>PT1M</Interval>') {
+    if ($taskXml -notmatch 'wscript.exe' -or $taskXml -notmatch 'schedule-daemon.vbs' -or $taskXml -match '<Interval>PT1M</Interval>') {
         throw "Unexpected schedule task XML: $taskXml"
     }
-	$launcher = Join-Path $data "services\$scheduled\schedule-timer.vbs"
+	$launcher = Join-Path $data "services\$scheduled\schedule-daemon.vbs"
 	$launcherText = Get-Content -LiteralPath $launcher -Raw
-	if ($launcherText -notmatch '__scheduled-run' -or $launcherText -notmatch ', 0, True') {
+	if ($launcherText -notmatch '__scheduled-run' -or $launcherText -notmatch '--activation.+daemon' -or $launcherText -notmatch ', 0, True') {
 		throw "Unexpected hidden schedule launcher: $launcherText"
 	}
+    $schedulerTaskName = if ($system) {
+        'spm-system-scheduler'
+    } else {
+        'spm-user-scheduler-' + [Security.Principal.WindowsIdentity]::GetCurrent().User.Value.Replace('-', '')
+    }
+    $schedulerTask = if ($system) {
+        Get-ScheduledTask -TaskName $schedulerTaskName -ErrorAction Stop
+    } else {
+        Get-ScheduledTask -TaskName $schedulerTaskName -ErrorAction Stop
+    }
+    if ($null -eq $schedulerTask -or $schedulerTask.State -eq 'Disabled') { throw 'SPM scheduler task is unavailable.' }
+    $schedulerXml = Export-ScheduledTask -TaskName $schedulerTask.TaskName
+    if ($schedulerXml -notmatch 'scheduler.vbs' -or $schedulerXml -notmatch '<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>') {
+        throw "Unexpected scheduler task XML: $schedulerXml"
+    }
     try {
         Wait-File $scheduleMarker 100
     } catch {
@@ -283,6 +299,19 @@ $scheduleAccountLine
     $scheduleDiff = (Invoke-Spm @('diff', $scheduleToml) -Capture) -join "`n"
     if ($scheduleDiff -notmatch "unchanged`t$([regex]::Escape($scheduledDeclared))") { throw "Unexpected schedule diff: $scheduleDiff" }
     Remove-Item -LiteralPath $scheduleToml -Force -ErrorAction SilentlyContinue
+
+    Write-Host "==> $Scope scheduled log rotation"
+    $rotationBytes = 11MB
+    $rotationArguments = @('schedule', '--name', $rotation, '--on-boot', '1day', '--no-enable')
+    if ($system) { $rotationArguments += @('--user', 'SYSTEM') }
+    $rotationArguments += @('--', $powershell, '-NoProfile', '-NonInteractive', '-Command', "[Console]::Out.Write(('x' * $rotationBytes))")
+    Invoke-Spm $rotationArguments | Out-Null
+    Invoke-Spm @('run', $rotation) | Out-Null
+    $rotationLog = Join-Path $data "services\$rotation\service.log"
+    $rotationBackup = "$rotationLog.1"
+    if (-not (Test-Path -LiteralPath $rotationBackup)) { throw 'Scheduled log did not rotate.' }
+    if ((Get-Item -LiteralPath $rotationBackup).Length -ne 10MB) { throw 'Rotated log does not have the configured 10 MiB size.' }
+    if ((Get-Item -LiteralPath $rotationLog).Length -ne 1MB) { throw 'Active log does not contain the post-rotation remainder.' }
 
     if (-not $system) {
         Write-Host '==> User crash/restart policy'

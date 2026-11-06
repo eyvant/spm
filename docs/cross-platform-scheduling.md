@@ -1,27 +1,28 @@
 # Cross-platform scheduling design
 
-Status: implemented baseline
+Status: implemented
 
 This document describes how `spm schedule` and scheduled declarations in
 `spm.toml` provide consistent behavior on Linux, Windows, and macOS. Linux uses
-systemd timers. Windows and macOS use native minute-level activation and the
-shared short-lived SPM runner described below.
+systemd timers. Windows and macOS use a scope-level scheduler daemon that sleeps
+until the nearest occurrence and delegates execution to Task Scheduler or
+launchd so native account isolation is preserved.
 
 ## Goals
 
-- Support the standard five-field cron syntax on all three platforms.
+- Support standard five-field cron and optional leading seconds on all three
+  platforms.
 - Keep observable scheduling behavior consistent across native service
   managers.
 - Continue to use systemd, Windows Task Scheduler, and launchd for activation,
   permissions, and recovery after a reboot.
-- Avoid requiring a permanently running spm scheduling daemon.
+- Run the Windows/macOS scheduler only while its scope has enabled schedules.
 - Make both `spm schedule` and `spm apply spm.toml` use the same scheduling
   implementation.
 
 ## Non-goals
 
-- Sub-minute cron schedules.
-- Quartz cron extensions, seconds or year fields, or aliases such as `@daily`.
+- Quartz year fields or aliases such as `@daily`.
 - Distributed locking between machines.
 - Guaranteed execution while a machine is powered off.
 - Replacing the operating system's native service or task manager.
@@ -61,10 +62,11 @@ mutually exclusive.
 
 ## Portable cron grammar
 
-SPM accepts a standard five-field cron expression:
+SPM accepts standard five-field cron and a six-field form with leading seconds:
 
 ```text
 minute hour day-of-month month day-of-week
+second minute hour day-of-month month day-of-week
 ```
 
 Each field supports:
@@ -90,7 +92,9 @@ different behavior.
 
 ### Precision and time zones
 
-- Cron precision is one minute.
+- Five-field cron has one-minute grammar and fires at second zero.
+- Six-field cron has one-second grammar. It is not a hard real-time guarantee;
+  process startup can be delayed by operating-system load.
 - `timezone` accepts an IANA time-zone name such as `Asia/Singapore`.
 - When `timezone` is omitted, the machine's local time zone is used.
 - SPM should embed the IANA time-zone database so Windows does not depend on an
@@ -101,7 +105,7 @@ different behavior.
 - A nonexistent local time during a forward transition is skipped.
 - If `persistent = true`, a skipped occurrence makes the job eligible for one
   catch-up run.
-- A repeated local minute during a backward transition runs only once.
+- A repeated local occurrence during a backward transition runs only once.
 - The execution identity used for deduplication is the scheduled local date and
   time in the declared time zone, not the time at which the runner happened to
   start.
@@ -136,24 +140,26 @@ different behavior.
 
 - `timer_interval` is measured from a persisted interval anchor rather than the
   most recent process start.
-- Portable intervals have a minimum duration of one minute.
+- Portable intervals may use second-level durations, with a minimum of one
+  second.
 - Restarting spm or reloading a native task does not reset the interval anchor.
 - `timer_on_boot` means the delay after operating-system boot.
 - A user-scoped backend that cannot run until login performs at most one late
   boot activation after the user session becomes available.
 
-## Runner model
+## Scheduler and runner model
 
-On Windows and macOS, the native scheduler starts a short-lived internal
-runner. The runner is not a permanently running scheduling daemon. Linux can
-use systemd's equivalent timer semantics directly and does not need a
-minute-level runner for schedules systemd can represent.
+On Windows and macOS, each user/system scope with at least one enabled calendar
+or interval schedule has one scheduler daemon. It calculates the nearest
+occurrence and sleeps directly until that instant. Removing or disabling the
+last schedule removes the daemon registration. Linux uses systemd timer
+semantics directly and does not need the daemon.
 
 ```text
-native activation
+scope scheduler daemon
        |
        v
-spm internal task-runner <name>
+native per-task executor
        |
        +-- load declaration and state
        +-- determine whether an occurrence is due
@@ -164,9 +170,9 @@ spm internal task-runner <name>
        `-- exit
 ```
 
-The internal command name is an implementation detail and does not need to be a
-documented user command. It must be bounded and non-interactive so native task
-managers can invoke it safely.
+The per-task executor remains a short-lived internal runner. This separation
+lets a system scheduler request execution without itself impersonating the
+task account: Task Scheduler and launchd retain ownership of account switching.
 
 The runner is responsible for all semantics that otherwise differ between
 platforms:
@@ -181,17 +187,10 @@ platforms:
 
 ## Native backend strategy
 
-Native schedules are an activation optimization, not the source of scheduling
-semantics.
-
-Linux installs exact native calendar triggers. The current Windows and macOS
-baseline installs a minute-level activation and lets the runner evaluate the
-canonical expression. Compiling exact Windows and macOS triggers is a future
-power and wake-up optimization; it does not change scheduling semantics.
-
-For minute-level activation, the runner evaluates the canonical cron expression
-and exits quickly when no occurrence is due. A future backend optimization may
-choose a narrower native trigger only if it cannot miss an eligible occurrence.
+Linux installs exact native calendar triggers. On Windows and macOS, the daemon
+is the timing authority while the native manager is the execution and recovery
+authority. The daemon never polls once per minute; it arms one timer for the
+nearest `next_run` and recalculates after activation or configuration changes.
 
 ### Linux
 
@@ -206,8 +205,8 @@ choose a narrower native trigger only if it cannot miss an eligible occurrence.
 
 - Use Windows Task Scheduler rather than the Service Control Manager for task
   activation.
-- Install calendar, boot, logon, and repetition triggers through Task Scheduler
-  XML or the Task Scheduler API.
+- Keep one dormant Task Scheduler executor per task and one logon/boot-activated
+  scope scheduler. The scheduler starts due executors with `schtasks /Run`.
 - User-scoped tasks run with the interactive user's credentials. System-scoped
   tasks use an explicitly selected service account and may require elevation.
 - Configure native multiple-instance behavior to ignore overlapping starts, in
@@ -215,12 +214,9 @@ choose a narrower native trigger only if it cannot miss an eligible occurrence.
 
 ### macOS
 
-- Use launchd `StartCalendarInterval`, `StartInterval`, and `RunAtLoad` where
-  they preserve the portable semantics.
-- Expand lists, ranges, and steps into an array of calendar dictionaries when
-  practical.
-- Use a minute-level calendar activation when launchd cannot express a trigger
-  exactly.
+- Keep one loaded, dormant launchd executor per task and one `RunAtLoad`,
+  `KeepAlive` scope scheduler. The scheduler uses `launchctl kickstart` for due
+  executors.
 - LaunchAgents implement user scope and LaunchDaemons implement system scope.
 
 ## Persistent state
@@ -244,6 +240,10 @@ State writes must be atomic. Stale locks are reclaimed after the owning process
 exits. Removing a task removes its scheduling state; disabling a task preserves
 state so re-enabling it does not reset interval or deduplication history.
 
+On Windows and macOS, both scheduled command output (`service.log`) and daemon
+diagnostics (`scheduler.log`) rotate at 10 MiB. SPM retains five numbered
+backups and enforces the limit during writes, not only when a task starts.
+
 ## Lifecycle behavior
 
 The following commands must operate on scheduled tasks consistently:
@@ -263,32 +263,32 @@ The following commands must operate on scheduled tasks consistently:
 Applying an unchanged declaration must be idempotent. Updating a command without
 changing its schedule must not reset scheduling history.
 
+Running `spm enable <name>` after upgrading rewrites an older Windows/macOS
+minute-triggered task into the shared-daemon layout while preserving its
+scheduling state. Recreating it with `spm schedule --force` has the same effect.
+
 ## Validation and safety limits
 
 - Reject invalid cron expressions before modifying native state.
 - Reject unsupported cron extensions instead of changing their meaning.
-- Limit native trigger expansion. Expressions exceeding the limit use the
-  minute-level runner fallback rather than failing or creating thousands of
-  triggers.
+- Keep Windows/macOS native executors trigger-free so complex expressions do
+  not expand into thousands of native calendar entries.
 - Validate IANA time zones on every platform.
 - Resolve and store the spm executable path used by native activation.
 - Quote command arguments using platform-specific rules; do not reconstruct a
   command through a shell unless the declaration explicitly invokes one.
 - Preserve the previous native task and state if replacement fails partway.
 
-## Implementation phases
+## Implementation map
 
-1. Extract cron parsing and occurrence calculation into a platform-independent
-   package with DST and OR-semantics tests.
-2. Add the runner, atomic state, and cross-process task lock.
-3. Extend Linux calendar conversion to the complete portable cron grammar and
-   OR semantics without changing its CLI or declaration format.
-4. Add launchd activation and lifecycle support.
-5. Add Windows Task Scheduler activation and lifecycle support.
-6. Enable scheduled declarations in the macOS and Windows `apply`, `validate`,
-   `diff`, and `export` paths.
-7. Add cross-platform conformance tests that feed identical clocks, state, and
-   declarations into every backend.
+- Shared Go code owns cron parsing, occurrence calculation, DST handling,
+  portable state, and locking.
+- Linux converts the same cron grammar to systemd `OnCalendar` and uses
+  `AccuracySec=1s`.
+- Windows registers the scope scheduler and dormant executors with Task
+  Scheduler.
+- macOS registers the scope scheduler and dormant executors with launchd.
+- Declarative and imperative commands call the same backend lifecycle paths.
 
 ## Conformance requirements
 

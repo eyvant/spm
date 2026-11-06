@@ -135,12 +135,13 @@ test "$PID_AFTER" != 0
 "$SPM" --system schedule \
   --name "$SCHEDULE" \
   --cwd /tmp \
-  --cron "*/15 * 1 * 1-5" \
+  --cron "*/5 * * 1 * 1-5" \
   --persistent \
   --run-now \
   -- /usr/bin/touch "$MARKER"
 test -e "$MARKER"
 grep -c '^OnCalendar=' "/etc/systemd/system/spm-$SCHEDULE.timer" | grep -Fx 2
+grep -Fx 'AccuracySec=1s' "/etc/systemd/system/spm-$SCHEDULE.timer"
 
 "$SPM" --system start --name "$DEPENDENCY" --cwd /tmp --restart no --no-enable -- /bin/sleep 300
 "$SPM" --system stop "$DEPENDENCY"

@@ -4,6 +4,7 @@ package app
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,6 +78,15 @@ type windowsBackend struct {
 }
 
 func runWindows(args []string, stdout, stderr io.Writer, system bool) error {
+	if len(args) > 0 && args[0] == "__windows-schedule-daemon" {
+		if len(args) != 3 || args[1] != "--root" || !filepath.IsAbs(args[2]) {
+			return errors.New("invalid Windows scheduler invocation")
+		}
+		root := filepath.Clean(args[2])
+		log, closeLog := openPortableSchedulerLog(root, stderr)
+		defer closeLog()
+		return runPortableScheduler(context.Background(), root, triggerWindowsScheduledTask, log)
+	}
 	if len(args) > 0 && args[0] == "__windows-service" {
 		if len(args) != 4 || args[1] != "--root" || !filepath.IsAbs(args[2]) {
 			return errors.New("invalid Windows service invocation")
@@ -1420,55 +1430,27 @@ func (b *windowsBackend) logs(args []string) error {
 		return nil
 	}
 	offsets := map[string]int64{}
+	identities := map[string]os.FileInfo{}
 	for _, name := range names {
 		if info, err := os.Stat(b.logPath(name)); err == nil {
 			offsets[name] = info.Size()
+			identities[name] = info
 		}
 	}
 	for {
 		time.Sleep(500 * time.Millisecond)
 		for _, name := range names {
 			path := b.logPath(name)
-			file, err := os.Open(path)
-			if err != nil {
-				continue
+			info, offset, readErr := readRotatingLogUpdates(b.stdout, path, identities[name], offsets[name], options.grep)
+			if readErr == nil {
+				identities[name], offsets[name] = info, offset
 			}
-			_, _ = file.Seek(offsets[name], io.SeekStart)
-			scanner := bufio.NewScanner(file)
-			for scanner.Scan() {
-				line := scanner.Text()
-				if options.grep == "" || strings.Contains(line, options.grep) {
-					fmt.Fprintln(b.stdout, line)
-				}
-			}
-			offsets[name], _ = file.Seek(0, io.SeekCurrent)
-			_ = file.Close()
 		}
 	}
 }
 
 func (b *windowsBackend) printLogTail(name string, count int, grep string) error {
-	data, err := os.ReadFile(b.logPath(name))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
-	var filtered []string
-	for _, line := range lines {
-		if line != "" && (grep == "" || strings.Contains(line, grep)) {
-			filtered = append(filtered, line)
-		}
-	}
-	if count >= 0 && len(filtered) > count {
-		filtered = filtered[len(filtered)-count:]
-	}
-	for _, line := range filtered {
-		fmt.Fprintln(b.stdout, line)
-	}
-	return nil
+	return printRotatedLogTail(b.stdout, b.logPath(name), count, grep)
 }
 
 func (b *windowsBackend) selectNames(selectors []string, deleteAll bool) ([]string, error) {
@@ -1513,8 +1495,12 @@ func (b *windowsBackend) removeMany(args []string) error {
 		return err
 	}
 	var errs []error
+	scheduleChanged := false
 	for _, name := range names {
 		config, _ := b.readConfig(name)
+		if config.Mode == "schedule" {
+			scheduleChanged = true
+		}
 		if err := b.stop(name); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 			continue
@@ -1527,6 +1513,11 @@ func (b *windowsBackend) removeMany(args []string) error {
 			continue
 		}
 		fmt.Fprintf(b.stdout, "%s deleted\n", name)
+	}
+	if scheduleChanged {
+		if err := b.refreshScheduleDaemon(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
 }

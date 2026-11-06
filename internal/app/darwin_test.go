@@ -70,6 +70,26 @@ func TestRenderDarwinSchedulePlistUsesPortableRunner(t *testing.T) {
 	}
 }
 
+func TestRenderDarwinDaemonExecutorHasNoPollingInterval(t *testing.T) {
+	config := darwinServiceConfig{Name: "backup", Enabled: true, Schedule: "30 0 4 * * *"}
+	plist := renderDarwinSchedulePlist(config, "com.eyvant.spm.backup", "/usr/local/bin/spm", "/tmp/schedule.json", "/tmp/state", "/tmp/task.log", "daemon", false)
+	if !strings.Contains(plist, "__scheduled-run") || !strings.Contains(plist, "<string>daemon</string>") {
+		t.Fatalf("unexpected daemon executor plist:\n%s", plist)
+	}
+	if strings.Contains(plist, "<key>StartInterval</key>") || strings.Contains(plist, "<key>RunAtLoad</key>") {
+		t.Fatalf("daemon executor unexpectedly has a native polling trigger:\n%s", plist)
+	}
+}
+
+func TestRenderDarwinScheduleDaemon(t *testing.T) {
+	plist := renderDarwinScheduleDaemonPlist("com.eyvant.spm.scheduler", "/usr/local/bin/spm", "/tmp/spm", "gui/501", "/tmp/scheduler.log")
+	for _, want := range []string{"__darwin-schedule-daemon", "<key>RunAtLoad</key>", "<key>KeepAlive</key>", "<string>gui/501</string>"} {
+		if !strings.Contains(plist, want) {
+			t.Errorf("scheduler plist does not contain %q:\n%s", want, plist)
+		}
+	}
+}
+
 func TestDarwinScheduledDeclarationIsPortable(t *testing.T) {
 	b := &darwinBackend{root: t.TempDir(), plistDir: t.TempDir(), uid: os.Getuid()}
 	service := serviceDeclaration{Name: "job", Command: []string{"/usr/bin/true"}, Schedule: "*/5 9-17 1 * 1-5", Timezone: "Asia/Singapore", Persistent: true}

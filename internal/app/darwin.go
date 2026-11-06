@@ -4,6 +4,7 @@ package app
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,6 +56,22 @@ type darwinBackend struct {
 }
 
 func runDarwin(args []string, stdout, stderr io.Writer, system bool) error {
+	if len(args) > 0 && args[0] == "__darwin-schedule-daemon" {
+		if len(args) != 5 || args[1] != "--root" || !filepath.IsAbs(args[2]) || args[3] != "--domain" {
+			return errors.New("invalid macOS scheduler invocation")
+		}
+		domain := args[4]
+		root := filepath.Clean(args[2])
+		log, closeLog := openPortableSchedulerLog(root, stderr)
+		defer closeLog()
+		return runPortableScheduler(context.Background(), root, func(name string) error {
+			command := exec.Command("launchctl", "kickstart", domain+"/com.eyvant.spm."+name)
+			if output, err := command.CombinedOutput(); err != nil {
+				return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
+			}
+			return nil
+		}, log)
+	}
 	if system && os.Geteuid() != 0 {
 		return errors.New("system mode requires root; run: sudo spm --system <command>")
 	}
@@ -776,54 +793,27 @@ func (b *darwinBackend) logs(args []string) error {
 		return nil
 	}
 	offsets := map[string]int64{}
+	identities := map[string]os.FileInfo{}
 	for _, name := range names {
 		if info, err := os.Stat(b.logPath(name)); err == nil {
 			offsets[name] = info.Size()
+			identities[name] = info
 		}
 	}
 	for {
 		time.Sleep(500 * time.Millisecond)
 		for _, name := range names {
-			file, err := os.Open(b.logPath(name))
-			if err != nil {
-				continue
+			path := b.logPath(name)
+			info, offset, readErr := readRotatingLogUpdates(b.stdout, path, identities[name], offsets[name], options.grep)
+			if readErr == nil {
+				identities[name], offsets[name] = info, offset
 			}
-			_, _ = file.Seek(offsets[name], io.SeekStart)
-			scanner := bufio.NewScanner(file)
-			for scanner.Scan() {
-				line := scanner.Text()
-				if options.grep == "" || strings.Contains(line, options.grep) {
-					fmt.Fprintln(b.stdout, line)
-				}
-			}
-			offsets[name], _ = file.Seek(0, io.SeekCurrent)
-			_ = file.Close()
 		}
 	}
 }
 
 func printFileTail(w io.Writer, path string, count int, grep string) error {
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
-	var filtered []string
-	for _, line := range lines {
-		if line != "" && (grep == "" || strings.Contains(line, grep)) {
-			filtered = append(filtered, line)
-		}
-	}
-	if count >= 0 && len(filtered) > count {
-		filtered = filtered[len(filtered)-count:]
-	}
-	for _, line := range filtered {
-		fmt.Fprintln(w, line)
-	}
-	return nil
+	return printRotatedLogTail(w, path, count, grep)
 }
 
 func (b *darwinBackend) selectNames(selectors []string) ([]string, error) {
@@ -867,7 +857,11 @@ func (b *darwinBackend) removeMany(args []string) error {
 		return err
 	}
 	var errs []error
+	scheduleChanged := false
 	for _, name := range names {
+		if config, configErr := b.readConfig(name); configErr == nil && config.Mode == "schedule" {
+			scheduleChanged = true
+		}
 		_ = b.bootout(name)
 		if err := os.Remove(b.plistPath(name)); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, err)
@@ -882,6 +876,11 @@ func (b *darwinBackend) removeMany(args []string) error {
 			continue
 		}
 		fmt.Fprintf(b.stdout, "%s deleted\n", name)
+	}
+	if scheduleChanged {
+		if err := b.refreshScheduleDaemon(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
 }

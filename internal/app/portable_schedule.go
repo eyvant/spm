@@ -47,8 +47,9 @@ type portableScheduleState struct {
 }
 
 type cronExpression struct {
-	minute, hour, day, month, weekday cronField
-	dayWildcard, weekdayWildcard      bool
+	second, minute, hour, day, month, weekday cronField
+	hasSeconds                                bool
+	dayWildcard, weekdayWildcard              bool
 }
 
 type cronField struct {
@@ -62,8 +63,21 @@ func parseCronExpression(expression string) (cronExpression, error) {
 		return result, errors.New("expression cannot contain a newline")
 	}
 	fields := strings.Fields(expression)
-	if len(fields) != 5 {
-		return result, fmt.Errorf("expected 5 fields, got %d", len(fields))
+	if len(fields) != 5 && len(fields) != 6 {
+		return result, fmt.Errorf("expected 5 or 6 fields, got %d", len(fields))
+	}
+	offset := 0
+	if len(fields) == 6 {
+		result.hasSeconds = true
+		offset = 1
+		field, err := parsePortableCronField(fields[0], 0, 59, false)
+		if err != nil {
+			return result, fmt.Errorf("second: %w", err)
+		}
+		result.second = field
+	} else {
+		result.second = cronField{minimum: 0, values: make([]bool, 60)}
+		result.second.values[0] = true
 	}
 	definitions := []struct {
 		name       string
@@ -73,11 +87,11 @@ func parseCronExpression(expression string) (cronExpression, error) {
 		normalize7 bool
 		target     *cronField
 	}{
-		{"minute", fields[0], 0, 59, false, &result.minute},
-		{"hour", fields[1], 0, 23, false, &result.hour},
-		{"day of month", fields[2], 1, 31, false, &result.day},
-		{"month", fields[3], 1, 12, false, &result.month},
-		{"day of week", fields[4], 0, 7, true, &result.weekday},
+		{"minute", fields[offset], 0, 59, false, &result.minute},
+		{"hour", fields[offset+1], 0, 23, false, &result.hour},
+		{"day of month", fields[offset+2], 1, 31, false, &result.day},
+		{"month", fields[offset+3], 1, 12, false, &result.month},
+		{"day of week", fields[offset+4], 0, 7, true, &result.weekday},
 	}
 	for _, definition := range definitions {
 		field, err := parsePortableCronField(definition.raw, definition.minimum, definition.maximum, definition.normalize7)
@@ -86,8 +100,8 @@ func parseCronExpression(expression string) (cronExpression, error) {
 		}
 		*definition.target = field
 	}
-	result.dayWildcard = fields[2] == "*"
-	result.weekdayWildcard = fields[4] == "*"
+	result.dayWildcard = fields[offset+2] == "*"
+	result.weekdayWildcard = fields[offset+4] == "*"
 	return result, nil
 }
 
@@ -165,7 +179,7 @@ func (field cronField) matches(value int) bool {
 }
 
 func (expression cronExpression) matches(value time.Time) bool {
-	if !expression.minute.matches(value.Minute()) || !expression.hour.matches(value.Hour()) || !expression.month.matches(int(value.Month())) {
+	if !expression.second.matches(value.Second()) || !expression.minute.matches(value.Minute()) || !expression.hour.matches(value.Hour()) || !expression.month.matches(int(value.Month())) {
 		return false
 	}
 	dayMatch := expression.day.matches(value.Day())
@@ -180,6 +194,109 @@ func (expression cronExpression) matches(value time.Time) bool {
 	default:
 		return dayMatch || weekdayMatch
 	}
+}
+
+func (expression cronExpression) resolution() time.Duration {
+	if expression.hasSeconds {
+		return time.Second
+	}
+	return time.Minute
+}
+
+func previousCronOccurrence(expression cronExpression, now, notBefore time.Time, location *time.Location) (time.Time, bool) {
+	localNow := now.In(location).Truncate(expression.resolution())
+	localStart := notBefore.In(location)
+	for day := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 12, 0, 0, 0, location); !day.Before(time.Date(localStart.Year(), localStart.Month(), localStart.Day(), 12, 0, 0, 0, location)); day = day.AddDate(0, 0, -1) {
+		if !expression.month.matches(int(day.Month())) {
+			continue
+		}
+		dayMatch := expression.day.matches(day.Day())
+		weekdayMatch := expression.weekday.matches(int(day.Weekday()))
+		if expression.dayWildcard && !weekdayMatch || expression.weekdayWildcard && !dayMatch || !expression.dayWildcard && !expression.weekdayWildcard && !dayMatch && !weekdayMatch {
+			continue
+		}
+		limitHour, limitMinute, limitSecond := 23, 59, 59
+		if day.Year() == localNow.Year() && day.YearDay() == localNow.YearDay() {
+			limitHour, limitMinute, limitSecond = localNow.Hour(), localNow.Minute(), localNow.Second()
+		}
+		for hour := limitHour; hour >= 0; hour-- {
+			if !expression.hour.matches(hour) {
+				continue
+			}
+			minuteLimit := 59
+			if hour == limitHour {
+				minuteLimit = limitMinute
+			}
+			for minute := minuteLimit; minute >= 0; minute-- {
+				if !expression.minute.matches(minute) {
+					continue
+				}
+				secondLimit := 59
+				if hour == limitHour && minute == minuteLimit {
+					secondLimit = limitSecond
+				}
+				for second := secondLimit; second >= 0; second-- {
+					if !expression.second.matches(second) {
+						continue
+					}
+					candidate := time.Date(day.Year(), day.Month(), day.Day(), hour, minute, second, 0, location)
+					if candidate.After(now) || !candidate.After(notBefore) || !expression.matches(candidate) {
+						continue
+					}
+					return candidate, true
+				}
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func nextCronOccurrence(expression cronExpression, after time.Time, location *time.Location) (time.Time, bool) {
+	localAfter := after.In(location)
+	lastDay := localAfter.AddDate(5, 0, 1)
+	for day := time.Date(localAfter.Year(), localAfter.Month(), localAfter.Day(), 12, 0, 0, 0, location); day.Before(lastDay); day = day.AddDate(0, 0, 1) {
+		if !expression.month.matches(int(day.Month())) {
+			continue
+		}
+		dayMatch := expression.day.matches(day.Day())
+		weekdayMatch := expression.weekday.matches(int(day.Weekday()))
+		if expression.dayWildcard && !weekdayMatch || expression.weekdayWildcard && !dayMatch || !expression.dayWildcard && !expression.weekdayWildcard && !dayMatch && !weekdayMatch {
+			continue
+		}
+		startHour, startMinute, startSecond := 0, 0, 0
+		if day.Year() == localAfter.Year() && day.YearDay() == localAfter.YearDay() {
+			startHour, startMinute, startSecond = localAfter.Hour(), localAfter.Minute(), localAfter.Second()
+		}
+		for hour := startHour; hour < 24; hour++ {
+			if !expression.hour.matches(hour) {
+				continue
+			}
+			minuteStart := 0
+			if hour == startHour {
+				minuteStart = startMinute
+			}
+			for minute := minuteStart; minute < 60; minute++ {
+				if !expression.minute.matches(minute) {
+					continue
+				}
+				secondStart := 0
+				if hour == startHour && minute == minuteStart {
+					secondStart = startSecond
+				}
+				for second := secondStart; second < 60; second++ {
+					if !expression.second.matches(second) {
+						continue
+					}
+					candidate := time.Date(day.Year(), day.Month(), day.Day(), hour, minute, second, 0, location)
+					if !candidate.After(after) || !expression.matches(candidate) {
+						continue
+					}
+					return candidate, true
+				}
+			}
+		}
+	}
+	return time.Time{}, false
 }
 
 func loadScheduleLocation(name string) (*time.Location, error) {
@@ -269,8 +386,8 @@ func validatePortableSchedule(record portableScheduleRecord) error {
 			if err != nil {
 				return fmt.Errorf("invalid %s: %w", name, err)
 			}
-			if name == "timer_interval" && duration < time.Minute {
-				return errors.New("timer_interval must be at least 1min on portable schedules")
+			if name == "timer_interval" && duration < time.Second {
+				return errors.New("timer_interval must be at least 1s")
 			}
 		}
 	}
@@ -367,13 +484,16 @@ func latestDueOccurrence(record portableScheduleRecord, state portableScheduleSt
 		if err != nil {
 			return time.Time{}, false, err
 		}
-		current := now.In(location).Truncate(time.Minute)
+		current := now.In(location).Truncate(expression.resolution())
 		if expression.matches(current) {
 			due = current
-		} else if record.Persistent {
+		} else if record.Persistent || activation == "daemon" {
 			start := state.LastCheckedAt
 			if start.IsZero() {
 				start = record.CreatedAt
+			}
+			if activation == "daemon" && !record.Persistent {
+				start = now.Add(-2 * time.Minute)
 			}
 			// Five years covers the longest gap in the supported grammar, including
 			// leap-day schedules, while bounding recovery from corrupt state.
@@ -381,11 +501,8 @@ func latestDueOccurrence(record portableScheduleRecord, state portableScheduleSt
 			if start.Before(minimum) {
 				start = minimum
 			}
-			for candidate := current.Add(-time.Minute); candidate.After(start.In(location)); candidate = candidate.Add(-time.Minute) {
-				if expression.matches(candidate) {
-					due = candidate
-					break
-				}
+			if candidate, ok := previousCronOccurrence(expression, current, start, location); ok {
+				due = candidate
 			}
 		}
 	}
@@ -568,7 +685,15 @@ func portableOccurrenceKey(record portableScheduleRecord, due time.Time) (string
 		if err != nil {
 			return "", err
 		}
-		return "cron:" + due.In(location).Format("2006-01-02T15:04"), nil
+		expression, err := parseCronExpression(record.Schedule)
+		if err != nil {
+			return "", err
+		}
+		format := "2006-01-02T15:04"
+		if expression.hasSeconds {
+			format = "2006-01-02T15:04:05"
+		}
+		return "cron:" + due.In(location).Format(format), nil
 	}
 	return "timer:" + due.UTC().Format(time.RFC3339Nano), nil
 }
@@ -577,10 +702,7 @@ func scheduledOutput(stdout, stderr io.Writer, path string) (io.Writer, func(), 
 	if path == "" {
 		return io.MultiWriter(stdout, stderr), func() {}, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, func() {}, err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	file, err := openRotatingLog(path, defaultLogMaxBytes, defaultLogBackups)
 	if err != nil {
 		return nil, func() {}, err
 	}

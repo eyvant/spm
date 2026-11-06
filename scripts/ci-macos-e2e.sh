@@ -12,6 +12,7 @@ DEPENDENT=$PREFIX-dependent
 DECLARED=$PREFIX-declared
 SCHEDULE=$PREFIX-scheduled
 SCHEDULE_DECLARED=$PREFIX-scheduled-declared
+ROTATION=$PREFIX-log-rotation
 CRASHING=$PREFIX-crashing
 MARKER="SPM_MACOS_READY_$PREFIX"
 TOML=${RUNNER_TEMP:-/tmp}/$PREFIX.toml
@@ -22,9 +23,11 @@ SCHEDULE_TOML=${RUNNER_TEMP:-/tmp}/$PREFIX-schedule.toml
 if [[ $SCOPE == system ]]; then
   command_spm() { sudo "$SPM" --system "$@"; }
   PLIST_DIR=/Library/LaunchDaemons
+  DATA_ROOT='/Library/Application Support/spm'
 else
   command_spm() { "$SPM" "$@"; }
   PLIST_DIR=$HOME/Library/LaunchAgents
+  DATA_ROOT="$HOME/Library/Application Support/spm"
 fi
 
 diagnose() {
@@ -41,7 +44,7 @@ diagnose() {
 cleanup() {
   trap - ERR
   set +e
-  for name in "$CRASHING" "$SCHEDULE_DECLARED" "$SCHEDULE" "$DEPENDENT" "$DEPENDENCY" "$DECLARED" "$MAIN"; do
+  for name in "$CRASHING" "$ROTATION" "$SCHEDULE_DECLARED" "$SCHEDULE" "$DEPENDENT" "$DEPENDENCY" "$DECLARED" "$MAIN"; do
     command_spm stop "$name" >/dev/null 2>&1
     command_spm delete --yes "$name" >/dev/null 2>&1
   done
@@ -139,7 +142,7 @@ wait_running "$DECLARED"
 command_spm diff "$TOML" | grep -F $'unchanged\t'"$DECLARED"
 
 echo "==> macOS $SCOPE native scheduling, portable cron, state, and lifecycle"
-schedule_args=(schedule --name "$SCHEDULE" --cron '* * * * *' --timezone UTC --persistent --randomized-delay 1s --cwd /tmp)
+schedule_args=(schedule --name "$SCHEDULE" --cron '*/5 * * * * *' --timezone UTC --persistent --randomized-delay 1s --cwd /tmp)
 if [[ $SCOPE == system ]]; then
   schedule_args+=(--user root --group wheel)
 fi
@@ -147,8 +150,13 @@ schedule_args+=(-- /bin/sh -c "date -u +%FT%TZ >> '$SCHEDULE_MARKER'")
 command_spm "${schedule_args[@]}"
 SCHEDULE_PLIST=$PLIST_DIR/com.eyvant.spm.$SCHEDULE.plist
 test -f "$SCHEDULE_PLIST"
-grep -F '<key>StartInterval</key>' "$SCHEDULE_PLIST"
+! grep -F '<key>StartInterval</key>' "$SCHEDULE_PLIST"
 grep -F '__scheduled-run' "$SCHEDULE_PLIST"
+grep -F '<string>daemon</string>' "$SCHEDULE_PLIST"
+SCHEDULER_PLIST=$PLIST_DIR/com.eyvant.spm.scheduler.plist
+test -f "$SCHEDULER_PLIST"
+grep -F '__darwin-schedule-daemon' "$SCHEDULER_PLIST"
+grep -F '<key>KeepAlive</key>' "$SCHEDULER_PLIST"
 command_spm native launchd print "$SCHEDULE" | grep -F "com.eyvant.spm.$SCHEDULE"
 for _ in {1..100}; do
   [[ -s $SCHEDULE_MARKER ]] && break
@@ -187,9 +195,27 @@ test ! -e "$PLIST_DIR/com.eyvant.spm.$SCHEDULE_DECLARED.plist"
 command_spm cat "$SCHEDULE_DECLARED" | grep -F '__scheduled-run'
 command_spm diff "$SCHEDULE_TOML" | grep -F $'unchanged\t'"$SCHEDULE_DECLARED"
 
+echo "==> macOS $SCOPE scheduled log rotation"
+rotation_args=(schedule --name "$ROTATION" --on-boot 1day --no-enable)
+if [[ $SCOPE == system ]]; then
+  rotation_args+=(--user root --group wheel)
+fi
+rotation_args+=(-- /bin/sh -c 'dd if=/dev/zero bs=1048576 count=11 2>/dev/null')
+command_spm "${rotation_args[@]}"
+command_spm run "$ROTATION"
+ROTATION_LOG="$DATA_ROOT/services/$ROTATION/service.log"
+if [[ $SCOPE == system ]]; then
+  test "$(sudo stat -f %z "$ROTATION_LOG.1")" -eq $((10 * 1024 * 1024))
+  test "$(sudo stat -f %z "$ROTATION_LOG")" -eq $((1024 * 1024))
+else
+  test "$(stat -f %z "$ROTATION_LOG.1")" -eq $((10 * 1024 * 1024))
+  test "$(stat -f %z "$ROTATION_LOG")" -eq $((1024 * 1024))
+fi
+
 cleanup
-for name in "$MAIN" "$DEPENDENCY" "$DEPENDENT" "$DECLARED" "$SCHEDULE" "$SCHEDULE_DECLARED" "$CRASHING"; do
+for name in "$MAIN" "$DEPENDENCY" "$DEPENDENT" "$DECLARED" "$SCHEDULE" "$SCHEDULE_DECLARED" "$ROTATION" "$CRASHING"; do
   test ! -e "$PLIST_DIR/com.eyvant.spm.$name.plist"
   test ! -e "$PLIST_DIR/com.eyvant.spm.$name.boot.plist"
 done
+test ! -e "$PLIST_DIR/com.eyvant.spm.scheduler.plist"
 echo "spm macOS $SCOPE integration passed"

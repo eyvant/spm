@@ -282,6 +282,12 @@ spm logs api --since 1h --grep ERROR
 spm logs api --boot --output json
 ```
 
+Windows/macOS scheduled-task output (`service.log`) and scheduler diagnostics
+(`scheduler.log`) rotate at 10 MiB and retain five backups (`.1` through `.5`).
+Rotation is applied while data is being written, including during one
+long-running scheduled invocation. Linux log capacity remains controlled by
+journald.
+
 ### Change an existing service
 
 Repeat the original start command with `--force`:
@@ -351,10 +357,18 @@ spm schedule --name cache-sync \
 `--persistent` catches up a missed calendar run after downtime. `--randomized-delay` helps avoid many hosts starting the same job together. Use `--timezone Asia/Singapore` with `--cron` when the server's local timezone is not appropriate.
 
 Scheduling is available on Linux, Windows, and macOS. Portable cron expressions
-use five fields and support numbers, `*`, lists, ranges, and steps. Interval
-schedules have a minimum duration of one minute. Windows uses Task Scheduler;
-macOS uses launchd; both invoke a short-lived spm runner and do not require a
-permanent scheduling daemon.
+use either five fields (`minute hour day month weekday`) or six fields (`second
+minute hour day month weekday`) and support numbers, `*`, lists, ranges, and
+steps. Windows and macOS use one on-demand scheduler per user/system scope; it
+sleeps until the nearest occurrence and asks Task Scheduler or launchd to run
+the task under its declared account. Linux continues to use native systemd
+timers. Five-field expressions remain compatible and run at second zero.
+
+For example, this six-field expression runs every day at `04:00:30`:
+
+```bash
+spm schedule --name precise --cron "30 0 4 * * *" -- ./job
+```
 
 ### Periodically restart a long-running service
 
@@ -366,7 +380,9 @@ spm start server.js --name api \
   --timezone Asia/Singapore
 ```
 
-spm creates and manages a companion systemd timer. Cron expressions use five fields. Generated systemd calendar expressions are validated before installation.
+spm creates and manages a companion systemd timer. Cron expressions use five
+fields or six fields with leading seconds. Generated systemd calendar
+expressions are validated before installation.
 
 ## System services
 

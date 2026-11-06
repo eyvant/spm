@@ -59,12 +59,9 @@ func validatePersistedSchedule(config persistedStartConfig) error {
 			return fmt.Errorf("invalid %s duration %q", field, value)
 		}
 		if value != "" {
-			duration, err := parsePortableDuration(value)
+			_, err := parsePortableDuration(value)
 			if err != nil {
 				return fmt.Errorf("invalid portable %s duration %q", field, value)
-			}
-			if field == "timer_interval" && duration < time.Minute {
-				return errors.New("timer_interval must be at least 1min on portable schedules")
 			}
 		}
 	}
@@ -165,8 +162,8 @@ func parseSchedule(args []string) (scheduleOptions, error) {
 			if err != nil {
 				return options, fmt.Errorf("invalid portable %s duration %q", flag, value)
 			}
-			if flag == "--interval" && duration < time.Minute {
-				return options, errors.New("--interval must be at least 1min on portable schedules")
+			if flag == "--interval" && duration < time.Second {
+				return options, errors.New("--interval must be at least 1s")
 			}
 		}
 	}
@@ -316,6 +313,7 @@ func renderScheduleTimer(name string, config persistedStartConfig, calendar stri
 	}
 	builder.WriteString("[Unit]\nDescription=" + escapeSystemdSpecifiers("Schedule for spm task: "+name) + "\nStartLimitIntervalSec=0\n\n")
 	builder.WriteString("[Timer]\n")
+	builder.WriteString("AccuracySec=1s\n")
 	if calendar != "" {
 		builder.WriteString("OnCalendar=" + calendar + "\n")
 	}

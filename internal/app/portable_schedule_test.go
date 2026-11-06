@@ -1,12 +1,56 @@
 package app
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestPortableSchedulerTriggersDueTaskAndStops(t *testing.T) {
+	root := localTempDir(t)
+	root, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(root, "services", "job")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "config.json"), []byte(`{"enabled":true,"mode":"schedule"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := portableScheduleRecord{Version: 1, Name: "job", Command: []string{"true"}, Schedule: "* * * * * *", CreatedAt: time.Now().Add(-time.Second)}
+	if err := writePortableSchedule(filepath.Join(directory, "schedule.json"), record); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	triggered := make(chan string, 1)
+	result := make(chan error, 1)
+	go func() {
+		result <- runPortableScheduler(ctx, root, func(name string) error {
+			triggered <- name
+			cancel()
+			return nil
+		}, io.Discard)
+	}()
+	select {
+	case name := <-triggered:
+		if name != "job" {
+			t.Fatalf("triggered %q, want job", name)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("scheduler did not trigger the due task")
+	}
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("scheduler returned %v, want context cancellation", err)
+	}
+}
 
 func TestPortableCronGrammarAndORRule(t *testing.T) {
 	expression, err := parseCronExpression("*/15 9-17/2 1,20 * 1-5/2")
@@ -26,6 +70,74 @@ func TestPortableCronGrammarAndORRule(t *testing.T) {
 		if got := expression.matches(test.value); got != test.want {
 			t.Errorf("matches(%s) = %v, want %v", test.value, got, test.want)
 		}
+	}
+}
+
+func TestPortableCronSupportsSeconds(t *testing.T) {
+	expression, err := parseCronExpression("30 */5 9-17 * * 1-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	location := time.FixedZone("test", 8*60*60)
+	if !expression.matches(time.Date(2026, 11, 6, 9, 10, 30, 0, location)) {
+		t.Fatal("six-field cron did not match its scheduled second")
+	}
+	if expression.matches(time.Date(2026, 11, 6, 9, 10, 31, 0, location)) {
+		t.Fatal("six-field cron matched the wrong second")
+	}
+	next, ok := nextCronOccurrence(expression, time.Date(2026, 11, 6, 9, 10, 30, 0, location), location)
+	if !ok || !next.Equal(time.Date(2026, 11, 6, 9, 15, 30, 0, location)) {
+		t.Fatalf("next occurrence = %s, %v", next, ok)
+	}
+}
+
+func TestFiveFieldCronRemainsMinuteBased(t *testing.T) {
+	expression, err := parseCronExpression("10 9 * * 1-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	location := time.UTC
+	if !expression.matches(time.Date(2026, 11, 6, 9, 10, 0, 0, location)) || expression.matches(time.Date(2026, 11, 6, 9, 10, 1, 0, location)) {
+		t.Fatal("five-field cron did not retain second-zero semantics")
+	}
+}
+
+func TestNextPortableScheduleOccurrenceUsesSeconds(t *testing.T) {
+	record := portableScheduleRecord{Schedule: "15 * * * * *", Timezone: "UTC", CreatedAt: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}
+	next, err := nextPortableScheduleOccurrence(record, portableScheduleState{}, time.Date(2026, 11, 6, 9, 10, 14, 500_000_000, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 11, 6, 9, 10, 15, 0, time.UTC)
+	if !next.Equal(want) {
+		t.Fatalf("next occurrence = %s, want %s", next, want)
+	}
+}
+
+func TestDiscoverPortableSchedulerTasksOnlyIncludesEnabledTimers(t *testing.T) {
+	root := localTempDir(t)
+	writeTask := func(name string, enabled bool, schedule string) {
+		directory := filepath.Join(root, "services", name)
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		config := fmt.Sprintf("{\"mode\":\"schedule\",\"enabled\":%t}\n", enabled)
+		if err := os.WriteFile(filepath.Join(directory, "config.json"), []byte(config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		record := portableScheduleRecord{Version: portableScheduleVersion, Name: name, Command: []string{"true"}, Schedule: schedule, CreatedAt: time.Now().UTC()}
+		if err := writePortableSchedule(filepath.Join(directory, "schedule.json"), record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTask("enabled", true, "*/5 * * * *")
+	writeTask("disabled", false, "*/5 * * * *")
+	tasks, err := discoverPortableSchedulerTasks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].record.Name != "enabled" {
+		t.Fatalf("unexpected scheduler tasks: %#v", tasks)
 	}
 }
 

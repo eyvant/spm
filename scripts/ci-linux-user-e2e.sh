@@ -92,11 +92,12 @@ EOF
 systemctl --user is-active --quiet "spm-$DECLARED.service"
 "$SPM" diff "$TOML" | grep -F $'unchanged\t'"$DECLARED"
 
-"$SPM" schedule --name "$SCHEDULE" --cron '*/15 * 1 * 1-5' --timezone UTC --persistent --run-now -- /usr/bin/touch "$SCHEDULE_MARKER"
+"$SPM" schedule --name "$SCHEDULE" --cron '*/5 * * 1 * 1-5' --timezone UTC --persistent --run-now -- /usr/bin/touch "$SCHEDULE_MARKER"
 test -e "$SCHEDULE_MARKER"
 SCHEDULE_TIMER=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/spm-$SCHEDULE.timer
 test -f "$SCHEDULE_TIMER"
 grep -c '^OnCalendar=' "$SCHEDULE_TIMER" | grep -Fx 2
+grep -Fx 'AccuracySec=1s' "$SCHEDULE_TIMER"
 systemctl --user is-active --quiet "spm-$SCHEDULE.timer"
 
 cat >>"$TOML" <<EOF

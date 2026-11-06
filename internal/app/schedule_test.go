@@ -93,8 +93,17 @@ func TestScheduleIntervalOnlySetsInitialAndRepeatingTrigger(t *testing.T) {
 	config := persistedConfigFrom(options.start)
 	config.Mode, config.TimerInterval = "schedule", options.interval
 	timer := renderScheduleTimer("sync", config, "")
-	if !strings.Contains(timer, "OnActiveSec=15min") || !strings.Contains(timer, "OnUnitActiveSec=15min") {
+	if !strings.Contains(timer, "AccuracySec=1s") || !strings.Contains(timer, "OnActiveSec=15min") || !strings.Contains(timer, "OnUnitActiveSec=15min") {
 		t.Fatalf("interval-only timer does not start and repeat:\n%s", timer)
+	}
+}
+
+func TestScheduleIntervalSupportsSecondPrecision(t *testing.T) {
+	if _, err := parseSchedule([]string{"--interval", "1s", "--", "go", "version"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseSchedule([]string{"--interval", "500ms", "--", "go", "version"}); err == nil {
+		t.Fatal("sub-second interval unexpectedly accepted")
 	}
 }
 

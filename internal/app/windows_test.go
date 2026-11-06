@@ -75,6 +75,30 @@ func TestRenderWindowsScheduleTaskUsesPortableRunner(t *testing.T) {
 	}
 }
 
+func TestRenderWindowsDaemonExecutorHasNoPollingTrigger(t *testing.T) {
+	config := windowsServiceConfig{Name: "backup", Enabled: true, Schedule: "30 0 4 * * *"}
+	xml := renderWindowsScheduleTask(config, `C:\data\schedule-daemon.vbs`, "S-1-5-18", "", "daemon", true)
+	for _, want := range []string{"<Triggers>", "schedule-daemon.vbs", "wscript.exe"} {
+		if !strings.Contains(xml, want) {
+			t.Errorf("daemon executor XML does not contain %q:\n%s", want, xml)
+		}
+	}
+	if strings.Contains(xml, "<CalendarTrigger>") || strings.Contains(xml, "<Interval>PT1M</Interval>") {
+		t.Fatalf("daemon executor unexpectedly polls:\n%s", xml)
+	}
+}
+
+func TestRenderWindowsScheduleDaemonStartsAtScopeActivation(t *testing.T) {
+	userXML := renderWindowsScheduleDaemonTask(`C:\data\scheduler.vbs`, "S-1-5-21-1", "InteractiveToken", false)
+	if !strings.Contains(userXML, "<LogonTrigger>") || !strings.Contains(userXML, "<RestartOnFailure>") {
+		t.Fatalf("unexpected user scheduler XML:\n%s", userXML)
+	}
+	systemXML := renderWindowsScheduleDaemonTask(`C:\data\scheduler.vbs`, "S-1-5-18", "", true)
+	if !strings.Contains(systemXML, "<BootTrigger>") || !strings.Contains(systemXML, "<RunLevel>HighestAvailable</RunLevel>") {
+		t.Fatalf("unexpected system scheduler XML:\n%s", systemXML)
+	}
+}
+
 func TestWriteWindowsScheduleLauncherHidesRunner(t *testing.T) {
 	path := filepath.Join(localTempDir(t), "schedule-timer.vbs")
 	if err := writeWindowsScheduleLauncher(path, `C:\Program Files\spm\spm.exe`, `C:\data\schedule.json`, `C:\data\state`, `C:\data\task.log`, "timer"); err != nil {

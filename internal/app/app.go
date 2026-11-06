@@ -380,7 +380,7 @@ Start options:
   --start-limit-burst COUNT   Starts allowed inside the rate limit interval
   --restart-max-delay DUR     Grow restart delays up to DUR (systemd 254+)
   --restart-steps COUNT       Steps from --restart-sec to the maximum delay
-  --cron-restart EXPRESSION   Restart on a 5-field cron schedule
+  --cron-restart EXPRESSION   Restart on a 5- or 6-field cron schedule
   --timezone ZONE             Time zone for cron schedules, for example Asia/Singapore
   --type TYPE                 exec, simple, notify, notify-reload, forking, or idle
   --pid-file PATH             PID file for --type forking
@@ -477,7 +477,7 @@ Options:
   --start-limit-burst COUNT
   --restart-max-delay DUR     Exponential restart delay ceiling
   --restart-steps COUNT       Restart delay steps
-  --cron-restart EXPRESSION   Restart on a 5-field cron schedule
+  --cron-restart EXPRESSION   Restart on a 5- or 6-field cron schedule
   --timezone ZONE             Time zone for cron schedules
   --type TYPE                 systemd service type, defaults to exec
   --pid-file PATH             PID file for --type forking
@@ -541,7 +541,7 @@ Examples:
   spm schedule [start options] [timer options] -- <command> [arguments]
 
 Options:
-  --cron EXPRESSION           Five-field cron schedule
+  --cron EXPRESSION           Five- or 6-field cron schedule (optional seconds)
   --on-boot DURATION          Run after boot or user manager startup
   --interval DURATION         Repeat after the previous activation
   --randomized-delay DUR      Add a random delay to timer triggers

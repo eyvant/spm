@@ -7,6 +7,8 @@ import (
 
 func TestCronToOnCalendar(t *testing.T) {
 	tests := map[string]string{
+		"*/10 * * * * *": "*-*-* *:*:00/10",
+		"30 0 4 * * *":   "*-*-* 04:00:30",
 		"*/30 * * * *":   "*-*-* *:00/30:00",
 		"0 3 * * *":      "*-*-* 03:00:00",
 		"15 4 1 * *":     "*-*-01 04:15:00",
@@ -43,7 +45,7 @@ func TestRenderCronRestartUnits(t *testing.T) {
 	if !strings.Contains(service, `ExecStart="/usr/bin/systemctl" "--user" "restart" "spm-api.service"`) {
 		t.Fatalf("unexpected restart service:\n%s", service)
 	}
-	for _, value := range []string{"# CronExpression=*/30 * * * *", "StartLimitIntervalSec=0", "OnCalendar=*-*-* *:00/30:00", "Unit=spm-api.cron-restart.service"} {
+	for _, value := range []string{"# CronExpression=*/30 * * * *", "StartLimitIntervalSec=0", "AccuracySec=1s", "OnCalendar=*-*-* *:00/30:00", "Unit=spm-api.cron-restart.service"} {
 		if !strings.Contains(timer, value) {
 			t.Errorf("timer does not contain %q:\n%s", value, timer)
 		}

@@ -25,6 +25,16 @@ func (b *darwinBackend) bootLabel(name string) string {
 	return b.label(name) + ".boot"
 }
 
+func (b *darwinBackend) scheduleDaemonLabel() string { return "com.eyvant.spm.scheduler" }
+
+func (b *darwinBackend) scheduleDaemonPlistPath() string {
+	return filepath.Join(b.plistDir, b.scheduleDaemonLabel()+".plist")
+}
+
+func (b *darwinBackend) serviceScheduleDaemonPlistPath() string {
+	return filepath.Join(b.root, "scheduler.plist")
+}
+
 func (b *darwinBackend) bootPlistPath(name string) string {
 	return filepath.Join(b.plistDir, b.bootLabel(name)+".plist")
 }
@@ -98,6 +108,9 @@ func (b *darwinBackend) schedule(args []string) error {
 			return err
 		}
 	}
+	if err := b.refreshScheduleDaemon(); err != nil {
+		return err
+	}
 	if options.runNow {
 		if err := b.runScheduledTask(name, true); err != nil {
 			return err
@@ -150,7 +163,7 @@ func (b *darwinBackend) writeSchedulePlists(config darwinServiceConfig) error {
 		return err
 	}
 	if config.Schedule != "" || config.TimerInterval != "" {
-		data := renderDarwinSchedulePlist(config, b.label(config.Name), executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), "timer", b.system)
+		data := renderDarwinSchedulePlist(config, b.label(config.Name), executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), "daemon", b.system)
 		if err := writeFileAtomic(b.servicePlistPath(config.Name), []byte(data), 0o644); err != nil {
 			return err
 		}
@@ -206,6 +219,8 @@ func renderDarwinSchedulePlist(config darwinServiceConfig, label, executable, re
 	}
 	if activation == "boot" {
 		builder.WriteString("  <key>RunAtLoad</key>\n  <true/>\n")
+	} else if activation == "daemon" {
+		// The shared scheduler starts this loaded, dormant job with launchctl kickstart.
 	} else {
 		builder.WriteString("  <key>StartInterval</key>\n  <integer>60</integer>\n")
 	}
@@ -245,7 +260,64 @@ func (b *darwinBackend) setScheduledEnabled(config darwinServiceConfig, enabled 
 		}
 	}
 	if enabled {
-		return b.bootstrapSchedule(config)
+		if err := b.bootstrapSchedule(config); err != nil {
+			return err
+		}
+	}
+	return b.refreshScheduleDaemon()
+}
+
+func (b *darwinBackend) refreshScheduleDaemon() error {
+	tasks, err := discoverPortableSchedulerTasks(b.root)
+	if err != nil {
+		return err
+	}
+	target := b.domain() + "/" + b.scheduleDaemonLabel()
+	if b.loadedScheduleTarget(target) {
+		_, _ = b.launchctl("bootout", target)
+	}
+	if len(tasks) == 0 {
+		_ = os.Remove(b.scheduleDaemonPlistPath())
+		_ = os.Remove(b.serviceScheduleDaemonPlistPath())
+		return nil
+	}
+	if err := os.MkdirAll(b.plistDir, 0o755); err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	data := renderDarwinScheduleDaemonPlist(b.scheduleDaemonLabel(), executable, b.root, b.domain(), filepath.Join(b.root, "scheduler.log"))
+	if err := writeFileAtomic(b.serviceScheduleDaemonPlistPath(), []byte(data), 0o644); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(b.scheduleDaemonPlistPath(), []byte(data), 0o644); err != nil {
+		return err
+	}
+	if _, err := b.launchctl("bootstrap", b.domain(), b.scheduleDaemonPlistPath()); err != nil {
+		return fmt.Errorf("bootstrap schedule daemon: %w", err)
 	}
 	return nil
+}
+
+func (b *darwinBackend) loadedScheduleTarget(target string) bool {
+	_, err := b.launchctl("print", target)
+	return err == nil
+}
+
+func renderDarwinScheduleDaemonPlist(label, executable, root, domain, logPath string) string {
+	var builder strings.Builder
+	builder.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n")
+	darwinPlistKeyString(&builder, "Label", label)
+	builder.WriteString("  <key>ProgramArguments</key>\n  <array>\n")
+	for _, value := range []string{executable, "__darwin-schedule-daemon", "--root", root, "--domain", domain} {
+		fmt.Fprintf(&builder, "    <string>%s</string>\n", darwinXMLEscape(value))
+	}
+	builder.WriteString("  </array>\n")
+	darwinPlistKeyString(&builder, "StandardOutPath", logPath)
+	darwinPlistKeyString(&builder, "StandardErrorPath", logPath)
+	builder.WriteString("  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <true/>\n  <key>ProcessType</key>\n  <string>Background</string>\n")
+	builder.WriteString("</dict>\n</plist>\n")
+	return builder.String()
 }

@@ -36,6 +36,15 @@ func (b *windowsBackend) scheduleTaskName(name, kind string) string {
 	return "spm-" + name + "-schedule" + suffix
 }
 
+func triggerWindowsScheduledTask(name string) error {
+	command := exec.Command("schtasks.exe", "/Run", "/TN", "spm-"+name+"-schedule")
+	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
+	}
+	return nil
+}
+
 func (b *windowsBackend) schedule(args []string) error {
 	options, err := parseSchedule(args)
 	if err != nil {
@@ -106,6 +115,9 @@ func (b *windowsBackend) schedule(args []string) error {
 		_ = os.RemoveAll(b.serviceDir(name))
 		return err
 	}
+	if err := b.refreshScheduleDaemon(); err != nil {
+		return err
+	}
 	if options.runNow {
 		if err := b.runScheduledTask(name, true); err != nil {
 			return err
@@ -138,17 +150,18 @@ func (b *windowsBackend) registerScheduledTask(config windowsServiceConfig) erro
 		return err
 	}
 	if config.Schedule != "" || config.TimerInterval != "" {
-		launcher := b.scheduleLauncherPath(config.Name, "timer")
-		if err := writeWindowsScheduleLauncher(launcher, executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), "timer"); err != nil {
+		launcher := b.scheduleLauncherPath(config.Name, "daemon")
+		if err := writeWindowsScheduleLauncher(launcher, executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), "daemon"); err != nil {
 			return err
 		}
-		xml := renderWindowsScheduleTask(config, launcher, principal, logonType, "timer", b.system)
+		_ = os.Remove(b.scheduleLauncherPath(config.Name, "timer"))
+		xml := renderWindowsScheduleTask(config, launcher, principal, logonType, "daemon", b.system)
 		if err := b.createScheduledTask(b.scheduleTaskName(config.Name, "timer"), xml); err != nil {
 			return err
 		}
 	} else {
 		_ = b.deleteScheduledTask(b.scheduleTaskName(config.Name, "timer"))
-		_ = os.Remove(b.scheduleLauncherPath(config.Name, "timer"))
+		_ = os.Remove(b.scheduleLauncherPath(config.Name, "daemon"))
 	}
 	if config.TimerOnBoot != "" {
 		launcher := b.scheduleLauncherPath(config.Name, "boot")
@@ -217,6 +230,8 @@ func renderWindowsScheduleTask(config windowsServiceConfig, launcherPath, princi
 			kind = "LogonTrigger"
 		}
 		trigger = fmt.Sprintf("    <%s>\n      <Enabled>%t</Enabled>\n    </%s>\n", kind, config.Enabled, kind)
+	} else if activation == "daemon" {
+		trigger = ""
 	} else {
 		start := time.Now().Add(time.Minute).Truncate(time.Minute).Format("2006-01-02T15:04:05")
 		trigger = fmt.Sprintf("    <CalendarTrigger>\n      <Repetition><Interval>PT1M</Interval><Duration>P1D</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>\n      <StartBoundary>%s</StartBoundary>\n      <Enabled>%t</Enabled>\n      <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>\n    </CalendarTrigger>\n", start, config.Enabled)
@@ -300,5 +315,96 @@ func (b *windowsBackend) setScheduledEnabled(config windowsServiceConfig, enable
 	if err := b.writeConfig(config); err != nil {
 		return err
 	}
-	return b.registerScheduledTask(config)
+	if err := b.registerScheduledTask(config); err != nil {
+		return err
+	}
+	return b.refreshScheduleDaemon()
+}
+
+func (b *windowsBackend) scheduleDaemonTaskName() string {
+	if b.system {
+		return "spm-system-scheduler"
+	}
+	current, err := user.Current()
+	if err != nil {
+		return "spm-user-scheduler"
+	}
+	return "spm-user-scheduler-" + strings.ReplaceAll(current.Uid, "-", "")
+}
+
+func (b *windowsBackend) scheduleDaemonLauncherPath() string {
+	return filepath.Join(b.root, "scheduler.vbs")
+}
+
+func (b *windowsBackend) refreshScheduleDaemon() error {
+	tasks, err := discoverPortableSchedulerTasks(b.root)
+	if err != nil {
+		return err
+	}
+	name := b.scheduleDaemonTaskName()
+	if len(tasks) == 0 {
+		_ = b.endScheduledTask(name)
+		_ = b.deleteScheduledTask(name)
+		_ = os.Remove(b.scheduleDaemonLauncherPath())
+		return nil
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := writeWindowsHiddenLauncher(b.scheduleDaemonLauncherPath(), executable, []string{"__windows-schedule-daemon", "--root", b.root}); err != nil {
+		return err
+	}
+	principal, logonType, err := b.scheduledTaskPrincipal("")
+	if err != nil {
+		return err
+	}
+	xml := renderWindowsScheduleDaemonTask(b.scheduleDaemonLauncherPath(), principal, logonType, b.system)
+	_ = b.endScheduledTask(name)
+	if err := b.createScheduledTask(name, xml); err != nil {
+		return err
+	}
+	command := exec.Command("schtasks.exe", "/Run", "/TN", name)
+	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("start scheduler: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+	return nil
+}
+
+func writeWindowsHiddenLauncher(path, executable string, arguments []string) error {
+	command := windowsQuoteCommand(executable)
+	for _, value := range arguments {
+		command += " " + windowsQuoteCommand(value)
+	}
+	script := "Set shell = CreateObject(\"WScript.Shell\")\r\n" +
+		"exitCode = shell.Run(" + vbscriptString(command) + ", 0, True)\r\n" +
+		"WScript.Quit exitCode\r\n"
+	return writeFileAtomic(path, []byte(script), 0o600)
+}
+
+func renderWindowsScheduleDaemonTask(launcherPath, principal, logonType string, system bool) string {
+	kind, runLevel := "LogonTrigger", "LeastPrivilege"
+	if system {
+		kind, runLevel = "BootTrigger", "HighestAvailable"
+	}
+	logonTypeXML := ""
+	if logonType != "" {
+		logonTypeXML = "<LogonType>" + windowsXMLEscape(logonType) + "</LogonType>"
+	}
+	return `<?xml version="1.0" encoding="UTF-16"?>` + "\n" +
+		`<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">` + "\n" +
+		"  <RegistrationInfo><Description>SPM portable schedule daemon</Description></RegistrationInfo>\n" +
+		"  <Triggers><" + kind + "><Enabled>true</Enabled></" + kind + "></Triggers>\n" +
+		"  <Principals><Principal id=\"Author\"><UserId>" + windowsXMLEscape(principal) + "</UserId>" + logonTypeXML + "<RunLevel>" + runLevel + "</RunLevel></Principal></Principals>\n" +
+		"  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><Enabled>true</Enabled><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure></Settings>\n" +
+		"  <Actions Context=\"Author\"><Exec><Command>wscript.exe</Command><Arguments>//B //Nologo " + windowsXMLEscape(windowsQuoteCommand(launcherPath)) + "</Arguments></Exec></Actions>\n" +
+		"</Task>\n"
+}
+
+func (b *windowsBackend) endScheduledTask(name string) error {
+	command := exec.Command("schtasks.exe", "/End", "/TN", name)
+	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	_ = command.Run()
+	return nil
 }
