@@ -120,7 +120,7 @@ jobs:
           archive="spm-${GITHUB_REF_NAME}-${{ matrix.name }}.tar.gz"
           mkdir -p build
           go build -buildvcs=false -trimpath \
-            -ldflags="-s -w -X github.com/eyvant/spm/internal/app.version=${version}" \
+            -ldflags="-s -w -X github.com/eyvant/spm/internal/app.version=${version} -X github.com/eyvant/spm/internal/app.commit=${GITHUB_SHA}" \
             -o build/spm ./cmd/spm
           cp LICENSE build/LICENSE
           tar -C build -czf "$archive" spm LICENSE
@@ -167,7 +167,7 @@ jobs:
           archive="spm-${GITHUB_REF_NAME}-${{ matrix.name }}.zip"
           mkdir -p build
           go build -buildvcs=false -trimpath \
-            -ldflags="-s -w -X github.com/eyvant/spm/internal/app.version=${version}" \
+            -ldflags="-s -w -X github.com/eyvant/spm/internal/app.version=${version} -X github.com/eyvant/spm/internal/app.commit=${GITHUB_SHA}" \
             -o build/spm.exe ./cmd/spm
           cp LICENSE build/LICENSE
           (cd build && zip -9 "../$archive" spm.exe LICENSE)
@@ -214,7 +214,7 @@ jobs:
           archive="spm-${GITHUB_REF_NAME}-${{ matrix.name }}.tar.gz"
           mkdir -p build
           go build -buildvcs=false -trimpath \
-            -ldflags="-s -w -X github.com/eyvant/spm/internal/app.version=${version}" \
+            -ldflags="-s -w -X github.com/eyvant/spm/internal/app.version=${version} -X github.com/eyvant/spm/internal/app.commit=${GITHUB_SHA}" \
             -o build/spm ./cmd/spm
           cp LICENSE build/LICENSE
           tar -C build -czf "$archive" spm LICENSE

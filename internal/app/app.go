@@ -17,15 +17,36 @@ import (
 	"time"
 )
 
-var version = "dev"
+var (
+	version = "dev"
+	commit  string
+)
 
 func init() {
-	if version != "dev" {
-		return
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if version == "dev" && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			version = info.Main.Version
+		}
+		if commit == "" {
+			for _, setting := range info.Settings {
+				if setting.Key == "vcs.revision" {
+					commit = setting.Value
+					break
+				}
+			}
+		}
 	}
-	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
-		version = info.Main.Version
+}
+
+func versionDisplay() string {
+	hash := strings.TrimSpace(commit)
+	if hash == "" {
+		return version
 	}
+	if len(hash) > 7 {
+		hash = hash[:7]
+	}
+	return fmt.Sprintf("%s (%s)", version, hash)
 }
 
 type runner interface {
@@ -172,7 +193,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		if len(args) != 1 {
 			return errors.New("version does not accept arguments")
 		}
-		fmt.Fprintf(stdout, "spm %s\n", version)
+		fmt.Fprintf(stdout, "spm %s\n", versionDisplay())
 		return nil
 	}
 	if args[0] == "health-probe" {
