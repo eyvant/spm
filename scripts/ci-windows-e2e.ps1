@@ -259,7 +259,7 @@ $accountLine
         throw "Unexpected scheduler task XML: $schedulerXml"
     }
     if ($system) {
-        if ($schedulerXml -notmatch '<BootTrigger>') { throw "System scheduler is missing its boot trigger: $schedulerXml" }
+        if ($schedulerXml -notmatch '<BootTrigger(?:\s*/>|>)') { throw "System scheduler is missing its boot trigger: $schedulerXml" }
     } else {
         if ($schedulerXml -match '<LogonTrigger>') { throw "User scheduler should use the Startup shortcut, not a privileged logon trigger: $schedulerXml" }
         $schedulerShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\spm-schedule-daemon.lnk'
