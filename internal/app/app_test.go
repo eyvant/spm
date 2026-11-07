@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -517,15 +518,25 @@ func TestPublicRunGlobalDispatch(t *testing.T) {
 
 func TestExecRunnerAndCommandErrors(t *testing.T) {
 	runner := execRunner{}
-	output, err := runner.Run("cmd.exe", "/d", "/c", "echo hello")
+	shell := "sh"
+	successArgs := []string{"-c", "echo hello"}
+	failureArgs := []string{"-c", "echo failure; exit 7"}
+	interactiveArgs := []string{"-c", "echo interactive"}
+	if runtime.GOOS == "windows" {
+		shell = "cmd.exe"
+		successArgs = []string{"/d", "/c", "echo hello"}
+		failureArgs = []string{"/d", "/c", "echo failure & exit /b 7"}
+		interactiveArgs = []string{"/d", "/c", "echo interactive"}
+	}
+	output, err := runner.Run(shell, successArgs...)
 	if err != nil || !strings.Contains(string(output), "hello") {
 		t.Fatalf("exec runner output = %q, %v", output, err)
 	}
-	if _, err := runner.Run("cmd.exe", "/d", "/c", "echo failure & exit /b 7"); err == nil || !strings.Contains(err.Error(), "failure") {
+	if _, err := runner.Run(shell, failureArgs...); err == nil || !strings.Contains(err.Error(), "failure") {
 		t.Fatalf("exec runner failure = %v", err)
 	}
 	var interactive bytes.Buffer
-	if err := runner.Interactive(strings.NewReader(""), &interactive, io.Discard, "cmd.exe", "/d", "/c", "echo interactive"); err != nil || !strings.Contains(interactive.String(), "interactive") {
+	if err := runner.Interactive(strings.NewReader(""), &interactive, io.Discard, shell, interactiveArgs...); err != nil || !strings.Contains(interactive.String(), "interactive") {
 		t.Fatalf("interactive runner output = %q, %v", interactive.String(), err)
 	}
 	base := errors.New("exit")
