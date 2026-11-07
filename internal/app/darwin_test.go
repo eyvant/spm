@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -256,5 +257,44 @@ func TestDarwinDeclarationPlans(t *testing.T) {
 		if !strings.Contains(output.String(), want) {
 			t.Errorf("detailed update plan missing %q: %s", want, output.String())
 		}
+	}
+}
+
+func TestDarwinNativeLifecycleWithCommandBoundary(t *testing.T) {
+	original := darwinExecCommand
+	darwinExecCommand = func(string, ...string) *exec.Cmd { return exec.Command("/usr/bin/true") }
+	t.Cleanup(func() { darwinExecCommand = original })
+	root := t.TempDir()
+	var output bytes.Buffer
+	b := &darwinBackend{root: root, plistDir: filepath.Join(root, "plists"), uid: os.Getuid(), stdout: &output, stderr: io.Discard}
+	if err := b.start([]string{"--name", "api", "--no-enable", "--", "go", "version"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"restart", "stop", "enable", "disable"} {
+		if err := b.controlMany(action, []string{"api"}); err != nil {
+			t.Fatalf("%s service: %v", action, err)
+		}
+	}
+	if err := b.native([]string{"launchd", "print", "api"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.schedule([]string{"--name", "job", "--interval", "5min", "--on-boot", "1min", "--", "go", "version"}); err != nil {
+		t.Fatal(err)
+	}
+	config, err := b.readConfig("job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, enabled := range []bool{false, true} {
+		if err := b.setScheduledEnabled(config, enabled); err != nil {
+			t.Fatal(err)
+		}
+		config.Enabled = enabled
+	}
+	if err := b.removeMany([]string{"api", "job"}); err != nil {
+		t.Fatal(err)
+	}
+	if b.exists("api") || b.exists("job") {
+		t.Fatal("services survived removal")
 	}
 }

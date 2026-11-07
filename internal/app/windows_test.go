@@ -801,6 +801,25 @@ func TestWindowsScheduledCommandBoundaries(t *testing.T) {
 	if err := b.registerUserStartup("job", os.Args[0]); err != nil {
 		t.Fatal(err)
 	}
+	regular := windowsServiceConfig{Version: windowsStateVersion, Name: "regular", Cwd: root, Command: []string{"go", "version"}, Restart: "no", RestartSec: "1s"}
+	if err := b.writeConfig(regular); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.writeState(windowsServiceState{Version: windowsStateVersion, Name: "regular", Status: "running", PID: os.Getpid(), SupervisorPID: os.Getpid()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.setEnabled("regular", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.writeState(windowsServiceState{Version: windowsStateVersion, Name: "regular", Status: "stopped"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.setEnabled("regular", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.removeMany([]string{"regular"}); err != nil {
+		t.Fatal(err)
+	}
 	for _, account := range []string{"SYSTEM", `NT AUTHORITY\LOCALSERVICE`, `NT AUTHORITY\NETWORKSERVICE`, `DOMAIN\svc`} {
 		if err := b.secureSystemData("job", account); err != nil {
 			t.Fatalf("secure data for %s: %v", account, err)
@@ -812,6 +831,15 @@ func TestWindowsScheduledCommandBoundaries(t *testing.T) {
 	} {
 		if err := b.schedule(args); err == nil {
 			t.Errorf("schedule(%v) unexpectedly succeeded", args)
+		}
+	}
+	for _, args := range [][]string{
+		{"--name", "bad-user", "--user", "someone", "--", "go", "version"},
+		{"--name", "bad-group", "--group", "staff", "--", "go", "version"},
+		{"--name", "bad-option", "--max-memory", "1G", "--", "go", "version"},
+	} {
+		if err := b.start(args); err == nil {
+			t.Errorf("start(%v) unexpectedly succeeded", args)
 		}
 	}
 	if err := b.schedule([]string{"--name", "nightly", "--interval", "1min", "--on-boot", "1min", "--run-now", "--", "go", "version"}); err != nil {
@@ -845,6 +873,9 @@ func TestWindowsScheduledCommandBoundaries(t *testing.T) {
 	if b.exists("nightly") {
 		t.Fatal("scheduled task survived removal")
 	}
+	if err := b.registerScheduledTask(windowsServiceConfig{Version: windowsStateVersion, Name: "job", Command: []string{"go"}, RunAs: "SYSTEM"}); err != nil {
+		t.Fatal(err)
+	}
 	joined := strings.Join(calls, "\n")
 	for _, want := range []string{"schtasks.exe /Create", "schtasks.exe /Run", "schtasks.exe /Delete", "sc.exe queryex", "sc.exe qc"} {
 		if !strings.Contains(joined, want) {
@@ -864,7 +895,33 @@ func TestWindowsScheduledCommandBoundaries(t *testing.T) {
 	if err := b.inspectSCMService("job", io.Discard, io.Discard); err == nil {
 		t.Fatal("failed SCM inspection unexpectedly succeeded")
 	}
+	if err := b.deleteScheduledTask("missing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.schedule([]string{"--name", "broken", "--interval", "1min", "--", "go", "version"}); err == nil {
+		t.Fatal("schedule with failed task registration unexpectedly succeeded")
+	}
+	if b.exists("broken") {
+		t.Fatal("failed schedule left service data behind")
+	}
+	if err := os.WriteFile(filepath.Join(b.serviceDir("job"), "acl-marker"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	call := 0
+	for _, failAt := range []int{1, 3, 4} {
+		call = 0
+		windowsExecCommand = func(string, ...string) *exec.Cmd {
+			call++
+			if call == failAt {
+				return exec.Command("cmd.exe", "/d", "/c", "echo acl failed & exit /b 1")
+			}
+			return exec.Command("cmd.exe", "/d", "/c", "exit 0")
+		}
+		if err := b.secureSystemData("job", "SYSTEM"); err == nil {
+			t.Errorf("secureSystemData with failure at command %d unexpectedly succeeded", failAt)
+		}
+	}
+	call = 0
 	windowsExecCommand = func(string, ...string) *exec.Cmd {
 		call++
 		if call == 1 {
