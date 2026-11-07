@@ -347,6 +347,10 @@ func printHelp(w io.Writer) {
 	if printPlatformHelp(w) {
 		return
 	}
+	printGenericHelp(w)
+}
+
+func printGenericHelp(w io.Writer) {
 	fmt.Fprint(w, `spm - a simple, cross-platform manager for native system services
 
 Usage:
@@ -479,6 +483,10 @@ func printCommandHelp(w io.Writer, command string) error {
 	if printPlatformCommandHelp(w, command) {
 		return nil
 	}
+	return printGenericCommandHelp(w, command)
+}
+
+func printGenericCommandHelp(w io.Writer, command string) error {
 	switch command {
 	case "start":
 		fmt.Fprint(w, `Usage:

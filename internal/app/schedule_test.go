@@ -121,3 +121,67 @@ func TestReadScheduleDescribesNonCronTimer(t *testing.T) {
 		}
 	}
 }
+
+func TestParseAndValidateScheduleRejectInvalidCombinations(t *testing.T) {
+	parseCases := [][]string{
+		{"--cron"}, {"--persistent=true", "--cron", "* * * * *", "--", "go"},
+		{"--persistent", "--on-boot", "1s", "--", "go"},
+		{"--interval", "nonsense", "--", "go"}, {"--interval", "500ms", "--", "go"},
+		{"--on-boot", "nonsense", "--", "go"}, {"--randomized-delay", "nonsense", "--interval", "1s", "--", "go"},
+		{"--on-boot", "1s", "--timezone", "UTC", "--", "go"},
+		{"--cron", "bad cron", "--", "go"}, {"--cron", "* * * * *", "--instances", "2", "--", "go"},
+		{"--cron", "* * * * *", "--type", "simple", "--", "go"},
+	}
+	for _, args := range parseCases {
+		if _, err := parseSchedule(args); err == nil {
+			t.Errorf("parseSchedule(%q) unexpectedly succeeded", args)
+		}
+	}
+
+	configs := []persistedStartConfig{
+		{Mode: "schedule"},
+		{Mode: "schedule", TimerOnBoot: "1s", Persistent: true},
+		{Mode: "schedule", TimerOnBoot: "1s", Timezone: "UTC"},
+		{Mode: "schedule", TimerOnBoot: "bad"},
+		{Mode: "schedule", TimerOnBoot: "1s", Instances: 2},
+		{Mode: "schedule", TimerOnBoot: "1s", Type: "simple"},
+	}
+	for _, config := range configs {
+		if err := validatePersistedSchedule(config); err == nil {
+			t.Errorf("validatePersistedSchedule(%#v) unexpectedly succeeded", config)
+		}
+	}
+	if err := validatePersistedSchedule(persistedStartConfig{Mode: "service"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInstallScheduledReplacementAndRunNow(t *testing.T) {
+	directory := localTempDir(t)
+	configDir := filepath.Join(directory, "config")
+	runner := &fakeRunner{}
+	a := &application{runner: runner, stdout: &strings.Builder{}, stderr: &strings.Builder{}, unitDir: directory, configDir: configDir}
+	for _, filename := range []string{unitName("job"), scheduleTimerName("job"), cronRestartTimerName("job"), healthTimerName("job")} {
+		if err := os.WriteFile(filepath.Join(directory, filename), []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	options := startOptions{name: "job", command: []string{"go", "version"}, restart: "no", restartSec: "1s", force: true}
+	config := persistedConfigFrom(options)
+	config.Mode, config.TimerInterval = "schedule", "1min"
+	if err := a.installScheduled(options, config, "", true); err != nil {
+		t.Fatal(err)
+	}
+	got := callsString(runner.calls)
+	for _, want := range []string{"disable --now spm-job.health.timer", "disable --now spm-job.cron-restart.timer", "disable --now spm-job.timer", "disable spm-job.timer", "start spm-job.service"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("calls do not contain %q:\n%s", want, got)
+		}
+	}
+	if _, err := os.Stat(a.cronRestartTimerPath("job")); !os.IsNotExist(err) {
+		t.Errorf("cron restart timer not removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(directory, healthTimerName("job"))); !os.IsNotExist(err) {
+		t.Errorf("health timer not removed: %v", err)
+	}
+}

@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -114,6 +116,52 @@ func TestNextPortableScheduleOccurrenceUsesSeconds(t *testing.T) {
 	}
 }
 
+func TestNextPortableScheduleOccurrenceCoversIntervalAndErrors(t *testing.T) {
+	created := time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
+	record := portableScheduleRecord{CreatedAt: created, TimerInterval: "15min"}
+	next, err := nextPortableScheduleOccurrence(record, portableScheduleState{}, created.Add(31*time.Minute))
+	if err != nil || !next.Equal(created.Add(45*time.Minute)) {
+		t.Fatalf("interval next = %s, %v", next, err)
+	}
+	anchor := created.Add(2 * time.Minute)
+	next, err = nextPortableScheduleOccurrence(record, portableScheduleState{IntervalAnchor: anchor}, created)
+	if err != nil || !next.Equal(anchor.Add(15*time.Minute)) {
+		t.Fatalf("anchored next = %s, %v", next, err)
+	}
+	record.Schedule = "0 9 * * *"
+	next, err = nextPortableScheduleOccurrence(record, portableScheduleState{}, created)
+	if err != nil || next.IsZero() {
+		t.Fatalf("combined next = %s, %v", next, err)
+	}
+	for _, invalid := range []portableScheduleRecord{{Schedule: "bad"}, {Schedule: "0 9 * * *", Timezone: "Bad/Zone"}, {TimerInterval: "bad"}} {
+		if _, err := nextPortableScheduleOccurrence(invalid, portableScheduleState{}, created); err == nil {
+			t.Errorf("invalid record %#v unexpectedly succeeded", invalid)
+		}
+	}
+}
+
+func TestPortableSchedulerCancellationWhileLocked(t *testing.T) {
+	root, err := filepath.Abs(localTempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(root, "scheduler-state", "run.lock")
+	if err := os.MkdirAll(lockPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lockPath, "pid"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := runPortableScheduler(ctx, root, func(string) error { return nil }, io.Discard); !errors.Is(err, context.Canceled) {
+		t.Fatalf("scheduler cancellation = %v", err)
+	}
+	if err := runPortableScheduler(context.Background(), "relative", func(string) error { return nil }, io.Discard); err == nil {
+		t.Fatal("relative scheduler root unexpectedly succeeded")
+	}
+}
+
 func TestDiscoverPortableSchedulerTasksOnlyIncludesEnabledTimers(t *testing.T) {
 	root := localTempDir(t)
 	writeTask := func(name string, enabled bool, schedule string) {
@@ -153,7 +201,84 @@ func TestScheduledHelperProcess(t *testing.T) {
 	if os.Getenv("SPM_TEST_SCHEDULE_HELPER") != "1" {
 		return
 	}
-	os.Exit(0)
+	code, _ := strconv.Atoi(os.Getenv("SPM_TEST_SCHEDULE_EXIT"))
+	os.Exit(code)
+}
+
+func TestPortableRunnerFailureLoggingAndEnvironment(t *testing.T) {
+	directory, err := filepath.Abs(localTempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	envFile := filepath.Join(directory, "task.env")
+	if err := os.WriteFile(envFile, []byte("# comment\nFROM_FILE='yes'\nOVERRIDE=old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recordPath := filepath.Join(directory, "schedule.json")
+	record := portableScheduleRecord{
+		Version: portableScheduleVersion, Name: "failing", Command: []string{os.Args[0], "-test.run=TestScheduledHelperProcess"},
+		Cwd: directory, EnvFile: envFile, Env: []string{"SPM_TEST_SCHEDULE_HELPER=1", "SPM_TEST_SCHEDULE_EXIT=7", "OVERRIDE=new", "INVALID"},
+		TimerInterval: "1h", CreatedAt: time.Now().UTC(),
+	}
+	if err := writePortableSchedule(recordPath, record); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(directory, "state")
+	logPath := filepath.Join(directory, "task.log")
+	err = runPortableSchedule([]string{"--config", recordPath, "--state-dir", stateDir, "--log", logPath, "--activation", "timer", "--force"}, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("failing scheduled command unexpectedly succeeded")
+	}
+	state := readPortableScheduleState(filepath.Join(stateDir, "schedule-state.json"))
+	if state.LastExitCode == nil || *state.LastExitCode != 7 {
+		t.Fatalf("exit state = %#v", state)
+	}
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatal(err)
+	}
+	environment := scheduledEnvironment(record)
+	joined := strings.Join(environment, "\n")
+	for _, want := range []string{"FROM_FILE=yes", "OVERRIDE=new", "SPM_TEST_SCHEDULE_EXIT=7"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("scheduled environment missing %q", want)
+		}
+	}
+	if got := formatScheduleTime(time.Time{}); got != "-" {
+		t.Errorf("zero schedule time = %q", got)
+	}
+	if got := scheduleExitCode(nil); got != "-" {
+		t.Errorf("nil exit code = %q", got)
+	}
+
+	for _, args := range [][]string{{"--config"}, {"--unknown"}, {"--config", "relative", "--state-dir", "relative"}} {
+		if err := runPortableSchedule(args, io.Discard, io.Discard); err == nil {
+			t.Errorf("runPortableSchedule(%v) unexpectedly succeeded", args)
+		}
+	}
+}
+
+func TestPortableScheduleLockDetectsLiveAndStaleOwners(t *testing.T) {
+	directory := localTempDir(t)
+	live := filepath.Join(directory, "live.lock")
+	if err := os.Mkdir(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "pid"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if locked, err := acquirePortableScheduleLock(live); err != nil || locked {
+		t.Fatalf("live lock = %v, %v", locked, err)
+	}
+	stale := filepath.Join(directory, "stale.lock")
+	if err := os.Mkdir(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "pid"), []byte("99999999"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if locked, err := acquirePortableScheduleLock(stale); err != nil || !locked {
+		t.Fatalf("stale lock = %v, %v", locked, err)
+	}
 }
 
 func TestPortableRunnerExecutesAndRecordsResult(t *testing.T) {

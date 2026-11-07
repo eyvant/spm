@@ -4,10 +4,8 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -120,21 +118,72 @@ func TestHealthProbeCLIRejectsMalformedArguments(t *testing.T) {
 	}
 }
 
-func TestProbeExecutionOnLinux(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("probe execution uses the Linux runtime")
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
+func TestProbeExecution(t *testing.T) {
+	originalClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		status := http.StatusNoContent
+		if request.URL.Path == "/fail" {
+			status = http.StatusServiceUnavailable
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+	})}
+	t.Cleanup(func() { http.DefaultClient = originalClient })
 	for _, probe := range []probeConfig{
-		{Kind: "http", Target: server.URL, Timeout: "1s", Retries: 1},
+		{Kind: "http", Target: "http://health.local/ok", Timeout: "1s", Retries: 1},
 		{Kind: "command", Target: "exit 0", Timeout: "1s", Retries: 1},
 	} {
 		if err := runProbe(probe); err != nil {
 			t.Fatalf("%s probe: %v", probe.Kind, err)
 		}
+	}
+	if err := runProbe(probeConfig{Kind: "http", Target: "http://health.local/fail", Timeout: "1s", Retries: 2, RetryDelay: "0s"}); err == nil {
+		t.Fatal("failing probe unexpectedly succeeded")
+	}
+}
+
+func TestHealthStatusAndStateClassification(t *testing.T) {
+	directory := localTempDir(t)
+	for _, name := range []string{"checking", "healthy", "unhealthy", "disabled"} {
+		if err := os.WriteFile(filepath.Join(directory, unitName(name)), []byte("unit"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if name != "disabled" {
+			if err := os.WriteFile(filepath.Join(directory, healthTimerName(name)), []byte("timer"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	runner := &fakeRunner{runFunc: func(_ string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "--user" {
+			args = args[1:]
+		}
+		if len(args) > 0 && args[0] == "show" {
+			return []byte(strings.Join([]string{
+				"Id=spm-checking.health.service\nActiveState=active\nResult=success\nExecMainStatus=0",
+				"Id=spm-healthy.health.service\nActiveState=inactive\nResult=success\nExecMainStatus=0",
+				"Id=spm-unhealthy.health.service\nActiveState=failed\nResult=exit-code\nExecMainStatus=1",
+				"Id=other.service\nActiveState=active",
+			}, "\n\n")), nil
+		}
+		return nil, nil
+	}}
+	var output strings.Builder
+	a := &application{runner: runner, stdout: &output, stderr: io.Discard, unitDir: directory}
+	states := a.readHealthStates([]string{"checking", "healthy", "unhealthy", "disabled"})
+	want := map[string]string{"checking": "checking", "healthy": "healthy", "unhealthy": "unhealthy", "disabled": "disabled"}
+	for name, state := range want {
+		if states[name] != state {
+			t.Errorf("state[%s] = %q, want %q", name, states[name], state)
+		}
+	}
+	if err := a.healthStatus("disabled"); err != nil || !strings.Contains(output.String(), "disabled") {
+		t.Fatalf("disabled health status = %v, %q", err, output.String())
+	}
+	if err := a.healthStatus("missing"); err == nil {
+		t.Fatal("missing health service unexpectedly succeeded")
+	}
+	if err := a.removeHealthFiles("checking"); err != nil || a.hasHealth("checking") {
+		t.Fatalf("removeHealthFiles() = %v", err)
 	}
 }
 

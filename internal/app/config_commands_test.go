@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -185,6 +186,49 @@ func TestRollbackValidation(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Errorf("rollback(%v) error = %v, want %q", test.args, err, test.want)
 		}
+	}
+}
+
+func TestRollbackInstallsSelectedHistoryRevision(t *testing.T) {
+	directory := localTempDir(t)
+	a := &application{runner: &fakeRunner{}, stdout: io.Discard, stderr: io.Discard, unitDir: directory, configDir: filepath.Join(directory, "config")}
+	current := persistedStartConfig{Version: 1, Cwd: directory, Restart: "always", RestartSec: "9s", Enable: true, Command: []string{"go", "version"}, ExplicitCmd: true}
+	if err := a.installConfig("api", current, false); err != nil {
+		t.Fatal(err)
+	}
+	history := a.historyDirectory("api")
+	if err := os.MkdirAll(history, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for index, delay := range []string{"1s", "2s"} {
+		config := current
+		config.RestartSec = delay
+		data, err := json.Marshal(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := filepath.Join(history, []string{"20260101.json", "20260102.json"}[index])
+		if err := os.WriteFile(name, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.rollback([]string{"api", "--revision", "2"}); err != nil {
+		t.Fatal(err)
+	}
+	rolled, err := a.readServiceConfig("api")
+	if err != nil || rolled.RestartSec != "1s" {
+		t.Fatalf("rolled config = %#v, %v", rolled, err)
+	}
+	for _, args := range [][]string{{"api", "--bad", "1"}, {"api", "--revision", "0"}, {"api", "--revision", "9"}} {
+		if err := a.rollback(args); err == nil {
+			t.Errorf("rollback(%v) unexpectedly succeeded", args)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(history, "20270101.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.rollback([]string{"api"}); err == nil {
+		t.Fatal("rollback of malformed history unexpectedly succeeded")
 	}
 }
 

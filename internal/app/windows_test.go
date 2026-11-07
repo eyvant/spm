@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -742,5 +743,59 @@ func TestWindowsRegularServiceListStatusAndDeadState(t *testing.T) {
 		if _, err := windowsRunAs(value, true); err == nil {
 			t.Errorf("invalid account %q unexpectedly accepted", value)
 		}
+	}
+}
+
+func TestWindowsScheduledCommandBoundaries(t *testing.T) {
+	original := windowsExecCommand
+	t.Cleanup(func() { windowsExecCommand = original })
+	var calls []string
+	windowsExecCommand = func(name string, args ...string) *exec.Cmd {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return exec.Command("cmd.exe", "/d", "/c", "exit 0")
+	}
+
+	root := localTempDir(t)
+	b := &windowsBackend{root: root, stdout: io.Discard, stderr: io.Discard}
+	if err := os.MkdirAll(b.serviceDir("job"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := windowsServiceConfig{
+		Version: windowsStateVersion, Name: "job", Command: []string{"worker.exe"}, Enabled: true,
+		Schedule: "* * * * *", TimerOnBoot: "1min", RunAs: "SYSTEM",
+	}
+	if err := b.registerScheduledTask(config); err != nil {
+		t.Fatal(err)
+	}
+	if err := triggerWindowsScheduledTask("job"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.deleteScheduledTask(b.scheduleTaskName("job", "timer")); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.removeLegacySystemTask("job"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.inspectSCMService("job", io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(calls, "\n")
+	for _, want := range []string{"schtasks.exe /Create", "schtasks.exe /Run", "schtasks.exe /Delete", "sc.exe queryex", "sc.exe qc"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("command calls do not contain %q:\n%s", want, joined)
+		}
+	}
+
+	windowsExecCommand = func(string, ...string) *exec.Cmd {
+		return exec.Command("cmd.exe", "/d", "/c", "echo simulated failure & exit /b 1")
+	}
+	if err := triggerWindowsScheduledTask("job"); err == nil {
+		t.Fatal("failed task trigger unexpectedly succeeded")
+	}
+	if err := b.createScheduledTask("job", "<Task/>"); err == nil {
+		t.Fatal("failed task creation unexpectedly succeeded")
+	}
+	if err := b.inspectSCMService("job", io.Discard, io.Discard); err == nil {
+		t.Fatal("failed SCM inspection unexpectedly succeeded")
 	}
 }

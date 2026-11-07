@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 type recordedCall struct {
@@ -361,6 +362,67 @@ func TestParseStartRejectsValuesForBooleanOptions(t *testing.T) {
 	}
 }
 
+func TestParseStartCoversAllOptionFamilies(t *testing.T) {
+	args := []string{
+		"--name=api", "--cwd=.", "--interpreter=node", "--env=A=1", "--env-file=.env",
+		"--restart=on-failure", "--restart-sec=2s", "--start-limit-interval=30s", "--start-limit-burst=5",
+		"--cron-restart=*/5 * * * *", "--description=API", "--max-memory=128M", "--user=svc", "--group=svc",
+		"--property=IOSchedulingClass=best-effort", "--exec-start-pre=echo pre", "--exec-start-post=echo post",
+		"--exec-stop=echo stop", "--exec-reload=echo reload", "--max-cpu=150%", "--max-tasks=50", "--nice=5",
+		"--open-files=2048", "--stop-signal=SIGINT", "--stop-timeout=20s", "--kill-mode=mixed", "--sandbox=basic",
+		"--after=network.target", "--wants=cache.service", "--requires=db.service", "--on-failure=notify.service",
+		"--wait-http=http://127.0.0.1/ready", "--health-command=echo ok", "--health-interval=15s",
+		"--health-timeout=3s", "--health-retries=2", "--health-retry-delay=500ms", "--health-start-period=1s",
+		"--health-action=restart", "--type=forking", "--pid-file=/tmp/api.pid", "--timezone=UTC", "--instances=2",
+		"--restart-max-delay=1min", "--restart-steps=8", "--mise", "--wait-timeout=12s", "--force", "--no-enable",
+		"--", "go", "version",
+	}
+	options, err := parseStart(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.name != "api" || options.instances != 2 || options.waitTimeout != 12*time.Second || !options.wait || !options.mise || options.enable {
+		t.Fatalf("unexpected parsed options: %#v", options)
+	}
+	if len(options.properties) < 10 || len(options.execStartPre) != 1 || len(options.onFailure) != 1 || options.health.Action != "restart" {
+		t.Fatalf("option families were not retained: %#v", options)
+	}
+
+	cleared, err := parseStart([]string{
+		"--no-mise", "--no-health", "--enable", "--no-cron-restart", "--clear-env", "--no-start-limit",
+		"--no-max-memory", "--clear-properties", "--clear-exec-hooks", "--clear-on-failure", "--", "go", "version",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"--mise", "--health", "--enable", "--cron-restart", "--env", "--start-limit-interval", "--start-limit-burst", "--max-memory", "--property", "--exec-hooks", "--on-failure"} {
+		if !cleared.set[key] {
+			t.Errorf("clear option did not mark %s as set", key)
+		}
+	}
+}
+
+func TestParseStartOptionErrors(t *testing.T) {
+	tests := [][]string{
+		nil,
+		{"script", "--", "go"},
+		{"--"},
+		{"--name"},
+		{"--sandbox=unknown", "go"},
+		{"--instances=-1", "go"},
+		{"--restart-max-delay=bad", "go"},
+		{"--restart-steps=0", "go"},
+		{"--health-retries=0", "go"},
+		{"--wait-timeout=0", "go"},
+		{"--unknown", "go"},
+	}
+	for _, args := range tests {
+		if _, err := parseStart(args); err == nil {
+			t.Errorf("parseStart(%v) unexpectedly succeeded", args)
+		}
+	}
+}
+
 func TestRenderUnitEscapesSystemdExpansion(t *testing.T) {
 	options := defaultStartOptions()
 	options.name = "api"
@@ -439,6 +501,51 @@ func TestValidateEnvironment(t *testing.T) {
 		if err := validateEnvironment(value); err == nil {
 			t.Errorf("validateEnvironment(%q) unexpectedly succeeded", value)
 		}
+	}
+}
+
+func TestValidatePreparedRejectsEveryInvalidFamily(t *testing.T) {
+	base := defaultStartOptions()
+	base.name = "api"
+	base.cwd = t.TempDir()
+	base.command = []string{"go", "version"}
+	tests := []struct {
+		name   string
+		mutate func(*startOptions)
+	}{
+		{"name", func(o *startOptions) { o.name = "bad/name" }},
+		{"command", func(o *startOptions) { o.command = nil }},
+		{"cwd", func(o *startOptions) { o.cwd = filepath.Join(t.TempDir(), "missing") }},
+		{"restart", func(o *startOptions) { o.restart = "sometimes" }},
+		{"restart delay", func(o *startOptions) { o.restartSec = "bad" }},
+		{"start limit interval", func(o *startOptions) { o.startLimitInterval = "bad" }},
+		{"start limit burst", func(o *startOptions) { o.startLimitBurst = "0" }},
+		{"memory", func(o *startOptions) { o.maxMemory = "huge" }},
+		{"user", func(o *startOptions) { o.runAsUser = "bad user" }},
+		{"group", func(o *startOptions) { o.runAsGroup = "bad group" }},
+		{"exec hook", func(o *startOptions) { o.execStartPre = []string{"bad\ncommand"} }},
+		{"environment", func(o *startOptions) { o.env = []string{"BAD"} }},
+		{"property", func(o *startOptions) { o.properties = []string{"User=root"} }},
+		{"dependency", func(o *startOptions) { o.requires = []string{"bad unit"} }},
+		{"health", func(o *startOptions) { o.health = healthConfig{Interval: "1s"} }},
+		{"wait probe", func(o *startOptions) { o.waitProbe = probeConfig{Kind: "bad", Target: "x"} }},
+		{"runtime", func(o *startOptions) { o.serviceType = "bad" }},
+		{"cron", func(o *startOptions) { o.cronRestart = "bad cron" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			options := base
+			test.mutate(&options)
+			if err := options.validatePrepared(); err == nil {
+				t.Fatalf("%s configuration unexpectedly validated: %#v", test.name, options)
+			}
+		})
+	}
+	valid := base
+	valid.cronRestart = "*/5 * * * *"
+	valid.timezone = "UTC"
+	if err := valid.validatePrepared(); err != nil || valid.cronCalendar == "" {
+		t.Fatalf("valid prepared options = %v, %#v", err, valid)
 	}
 }
 
@@ -849,6 +956,80 @@ func TestCheckStartedReportsSystemdResult(t *testing.T) {
 	}
 }
 
+func TestActivationSnapshotRestoreAndWaitBranches(t *testing.T) {
+	states := []struct {
+		active, enabled string
+		want            activationState
+	}{
+		{"active", "enabled", activationState{active: true, activeKnown: true, enabled: true, enabledKnown: true}},
+		{"inactive", "disabled", activationState{activeKnown: true, enabledKnown: true}},
+		{"failed", "static", activationState{activeKnown: true, enabledKnown: true}},
+		{"unknown", "masked", activationState{}},
+	}
+	for _, test := range states {
+		runner := &fakeRunner{runFunc: func(_ string, args ...string) ([]byte, error) {
+			if strings.Contains(strings.Join(args, " "), "is-active") {
+				return []byte(test.active + "\n"), nil
+			}
+			return []byte(test.enabled + "\n"), nil
+		}}
+		a := &application{runner: runner}
+		if got := a.readActivationState("spm-api.service"); got != test.want {
+			t.Errorf("activation %s/%s = %#v, want %#v", test.active, test.enabled, got, test.want)
+		}
+		if err := a.restoreActivationState("spm-api.service", test.want); err != nil {
+			t.Errorf("restore activation: %v", err)
+		}
+	}
+
+	directory := localTempDir(t)
+	existing := filepath.Join(directory, "existing")
+	missing := filepath.Join(directory, "missing")
+	if err := os.WriteFile(existing, []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	backups, err := snapshotFiles([]string{existing, missing})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(existing, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(missing, []byte("created"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreFiles(backups); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(existing)
+	if err != nil || string(data) != "old" {
+		t.Fatalf("restored file = %q, %v", data, err)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("new file survived restore: %v", err)
+	}
+
+	call := 0
+	runner := &fakeRunner{runFunc: func(_ string, _ ...string) ([]byte, error) {
+		call++
+		state := "ActiveState=activating\nSubState=start\n"
+		if call > 1 {
+			state = "ActiveState=active\nSubState=running\n"
+		}
+		return []byte("Id=spm-api.service\n" + state), nil
+	}}
+	a := &application{runner: runner, sleep: func(time.Duration) {}}
+	if err := a.waitForUnitActive(unitName("api"), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	runner.runFunc = func(_ string, _ ...string) ([]byte, error) {
+		return []byte("Id=spm-api.service\nActiveState=failed\nSubState=failed\n"), nil
+	}
+	if err := a.waitForUnitActive(unitName("api"), time.Second); err == nil {
+		t.Fatal("failed service unexpectedly became active")
+	}
+}
+
 func TestStartConveniencePropertiesAndDependencies(t *testing.T) {
 	options, err := parseStart([]string{
 		"--max-cpu", "200%", "--max-tasks", "50", "--stop-timeout", "45s", "--sandbox", "basic",
@@ -914,6 +1095,89 @@ func TestPowerShellScriptRuntime(t *testing.T) {
 	}
 	if gotOptions := scriptRuntimeOptions("worker.PS1"); !reflect.DeepEqual(gotOptions, wantOptions) {
 		t.Fatalf("PowerShell options = %v, want %v", gotOptions, wantOptions)
+	}
+}
+
+func TestPrepareScriptRuntimeMatrix(t *testing.T) {
+	directory := t.TempDir()
+	runtimes := map[string]string{".js": "node", ".mjs": "node", ".cjs": "node", ".py": "python3", ".rb": "ruby", ".sh": "sh"}
+	if runtime.GOOS == "windows" {
+		runtimes[".ps1"] = "powershell.exe"
+	} else {
+		runtimes[".ps1"] = "pwsh"
+	}
+	added := map[string]bool{}
+	for extension, runtimeName := range runtimes {
+		if !added[runtimeName] {
+			addFakeExecutableToPath(t, runtimeName)
+			added[runtimeName] = true
+		}
+		path := filepath.Join(directory, "worker"+extension)
+		if err := os.WriteFile(path, []byte("content\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		options, err := parseStart([]string{path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := options.prepare(); err != nil {
+			t.Fatalf("prepare %s: %v", extension, err)
+		}
+		gotRuntime := strings.TrimSuffix(executableBase(options.command[0]), ".exe")
+		wantRuntime := strings.TrimSuffix(executableBase(runtimeName), ".exe")
+		if gotRuntime != wantRuntime {
+			t.Errorf("%s runtime = %q, want %q", extension, options.command[0], runtimeName)
+		}
+	}
+	unknown := filepath.Join(directory, "worker.unknown")
+	if err := os.WriteFile(unknown, []byte("content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	options, err := parseStart([]string{unknown})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := options.prepare(); err == nil && runtime.GOOS != "windows" {
+		t.Fatal("unknown script runtime unexpectedly succeeded")
+	}
+	for _, path := range []string{"path with spaces", `path"quoted`, "plain"} {
+		_ = systemdPathList(path)
+	}
+}
+
+func TestResolveExecutableAndExplicitScriptBranches(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "tool")
+	if runtime.GOOS == "windows" {
+		executable += ".bat"
+	}
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolveExecutableFromPath(filepath.Base(executable), directory, directory)
+	if err != nil || resolved == "" {
+		t.Fatalf("resolve search path = %q, %v", resolved, err)
+	}
+	resolved, err = resolveExecutableFromPath("."+string(filepath.Separator)+filepath.Base(executable), directory, "")
+	if err != nil || resolved == "" {
+		t.Fatalf("resolve relative executable = %q, %v", resolved, err)
+	}
+	if _, err := resolveExecutableFromPath("missing", directory, directory); err == nil {
+		t.Fatal("missing executable unexpectedly resolved")
+	}
+	script := filepath.Join(directory, "script.js")
+	if err := os.WriteFile(script, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	command := []string{"node", "script.js"}
+	if err := resolveExplicitScript(command, directory); err != nil || command[1] != script {
+		t.Fatalf("explicit script = %v, %v", command, err)
+	}
+	for _, command := range [][]string{{"node", "-e", "code"}, {"node", "missing.js"}, {"program"}} {
+		err := resolveExplicitScript(command, directory)
+		if len(command) > 1 && command[len(command)-1] == "missing.js" && err == nil {
+			t.Error("missing explicit script unexpectedly succeeded")
+		}
 	}
 }
 

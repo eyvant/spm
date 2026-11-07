@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -161,6 +162,38 @@ func TestMCPFocusedToolValidation(t *testing.T) {
 		if result["isError"] != true {
 			t.Errorf("%s(%s) was not rejected: %#v", test.name, test.raw, result)
 		}
+	}
+}
+
+func TestMCPToolDispatchCoversFocusedTools(t *testing.T) {
+	root := localTempDir(t)
+	t.Setenv("SPM_WINDOWS_DATA_DIR", root)
+	t.Setenv("APPDATA", filepath.Join(root, "appdata"))
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{"spm_list_services", `{}`},
+		{"spm_show_service", `{"name":"missing"}`},
+		{"spm_get_logs", `{"names":["missing"],"lines":25,"since":"1h","grep":"error","health":true}`},
+		{"spm_doctor", `{}`},
+		{"spm_create_service", `{"name":"api","command":["missing-command"],"cwd":".","envFile":".env","restart":"bad","force":true}`},
+		{"spm_start_service", `{"name":"missing"}`},
+		{"spm_restart_service", `{"name":"missing"}`},
+		{"spm_stop_service", `{"name":"missing"}`},
+		{"spm_enable_service", `{"name":"missing"}`},
+		{"spm_disable_service", `{"name":"missing"}`},
+		{"spm_delete_service", `{"name":"missing"}`},
+		{"spm_run_cli", `{"arguments":["help","start"]}`},
+	}
+	for _, test := range tests {
+		result := callSPMTool(test.name, json.RawMessage(test.raw))
+		if result["content"] == nil {
+			t.Errorf("%s returned no content: %#v", test.name, result)
+		}
+	}
+	if result := callSPMTool("spm_get_logs", json.RawMessage(`{}`)); result["content"] == nil {
+		t.Fatalf("default log arguments returned %#v", result)
 	}
 }
 

@@ -565,3 +565,138 @@ func TestExecRunnerAndCommandErrors(t *testing.T) {
 		t.Fatalf("notices = %q", notices.String())
 	}
 }
+
+func TestGenericHelpAndApplicationDispatch(t *testing.T) {
+	var output bytes.Buffer
+	printGenericHelp(&output)
+	if !strings.Contains(output.String(), "Common commands") {
+		t.Fatalf("generic help output = %q", output.String())
+	}
+	commands := []string{
+		"start", "schedule", "run", "list", "ls", "status-all", "signal", "kill", "scale", "doctor",
+		"status", "show", "describe", "restart", "stop", "reload", "enable", "disable", "set", "unset",
+		"clone", "history", "rollback", "delete", "remove", "rm", "logs", "cat", "edit", "startup",
+		"apply", "validate", "diff", "native", "security", "export", "health", "import", "mcp", "version", "completion",
+	}
+	for _, command := range commands {
+		output.Reset()
+		if err := printGenericCommandHelp(&output, command); err != nil {
+			t.Errorf("printGenericCommandHelp(%q): %v", command, err)
+		}
+		if output.Len() == 0 {
+			t.Errorf("printGenericCommandHelp(%q) produced no output", command)
+		}
+	}
+	if err := printGenericCommandHelp(io.Discard, "missing"); err == nil {
+		t.Fatal("unknown generic help command unexpectedly succeeded")
+	}
+
+	directory := localTempDir(t)
+	a := &application{runner: &fakeRunner{}, stdin: strings.NewReader(""), stdout: io.Discard, stderr: io.Discard, unitDir: directory, configDir: filepath.Join(directory, "config")}
+	invocations := [][]string{
+		{"start"}, {"schedule"}, {"run"}, {"list", "--bad"}, {"signal"}, {"kill"}, {"scale"}, {"doctor", "extra"},
+		{"status"}, {"show"}, {"describe"}, {"restart"}, {"stop"}, {"reload"}, {"enable"}, {"disable"},
+		{"set"}, {"unset"}, {"clone"}, {"history"}, {"rollback"}, {"delete"}, {"remove"}, {"rm"},
+		{"logs", "--bad"}, {"cat"}, {"edit"}, {"startup", "extra"}, {"apply"}, {"validate"}, {"diff"},
+		{"native"}, {"security"}, {"export"}, {"health"}, {"health-probe"}, {"import"}, {"unknown"},
+	}
+	for _, invocation := range invocations {
+		_ = a.run(invocation)
+	}
+
+	if err := os.WriteFile(filepath.Join(directory, unitName("api")), []byte("unit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"status", "show", "cat"} {
+		if err := a.native([]string{"systemd", action, "api"}); err != nil {
+			t.Errorf("native %s: %v", action, err)
+		}
+	}
+}
+
+func TestDescribeTemplateAndConfigRows(t *testing.T) {
+	directory := localTempDir(t)
+	if err := os.WriteFile(filepath.Join(directory, templateUnitName("worker")), []byte("template"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{runFunc: func(_ string, _ ...string) ([]byte, error) {
+		return []byte("Id=spm-worker@0.service\nActiveState=active\nSubState=running\nMainPID=10\nMemoryCurrent=1024\nNRestarts=1\nActiveEnterTimestampMonotonic=1000000\n\nId=spm-worker@1.service\nActiveState=inactive\nSubState=dead\nMainPID=0\nMemoryCurrent=0\nNRestarts=0\nActiveEnterTimestampMonotonic=0\n"), nil
+	}}
+	var output bytes.Buffer
+	a := &application{runner: runner, stdout: &output, stderr: io.Discard, unitDir: directory, configDir: filepath.Join(directory, "config")}
+	config := persistedStartConfig{Version: 1, Command: []string{"go", "run", "worker.go"}, Cwd: directory, Restart: "always", RestartSec: "3s", Env: []string{"PORT=3000", "DEBUG=1", "INVALID"}, Instances: 2}
+	if err := a.writeServiceConfig("worker", config); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.describeInstances("worker"); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"instances", "worker@0", "worker@1", "PORT,DEBUG", "current user"} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("template description missing %q:\n%s", want, output.String())
+		}
+	}
+	if got := environmentKeys(nil); got != "-" {
+		t.Fatalf("environmentKeys(nil) = %q", got)
+	}
+	a.system = true
+	config.User = ""
+	if err := a.writeServiceConfig("worker", config); err != nil {
+		t.Fatal(err)
+	}
+	rows := a.configRows("worker")
+	if len(rows) == 0 {
+		t.Fatal("system config rows are empty")
+	}
+	if rows := a.configRows("missing"); rows != nil {
+		t.Fatalf("missing config rows = %#v", rows)
+	}
+	for _, duration := range []time.Duration{0, time.Second, time.Minute, time.Hour, 24 * time.Hour} {
+		_ = formatUptime(duration, 10)
+	}
+	for _, bytes := range []string{"", "0", "1023", "1024", "1048576", "1073741824", "bad"} {
+		_ = formatBytes(bytes)
+	}
+}
+
+func TestInspectStartupAndSmallHelpers(t *testing.T) {
+	directory := localTempDir(t)
+	if err := os.WriteFile(filepath.Join(directory, unitName("api")), []byte("unit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{lingerOutput: []byte("no\n")}
+	var output bytes.Buffer
+	a := &application{runner: runner, stdin: strings.NewReader(""), stdout: &output, stderr: io.Discard, unitDir: directory, configDir: filepath.Join(directory, "config")}
+	for _, action := range []string{"cat", "edit"} {
+		if err := a.inspectUnit(action, "api", nil); err != nil {
+			t.Errorf("inspectUnit(%s): %v", action, err)
+		}
+	}
+	if err := a.inspectUnit("cat", "", errors.New("parse")); err == nil {
+		t.Fatal("inspectUnit parse error was ignored")
+	}
+	if err := a.inspectUnit("cat", "missing", nil); err == nil {
+		t.Fatal("inspectUnit missing service unexpectedly succeeded")
+	}
+	if err := a.startup(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.startup([]string{"extra"}); err == nil {
+		t.Fatal("startup arguments unexpectedly succeeded")
+	}
+	for action, want := range map[string]string{"start": "started", "stop": "stopped", "restart": "restarted", "reload": "reloaded", "enable": "enabled", "disable": "disabled and stopped", "other": "other"} {
+		if got := actionPastTense(action); got != want {
+			t.Errorf("actionPastTense(%q) = %q, want %q", action, got, want)
+		}
+	}
+	if got := a.savedRestartPolicy("missing"); got != "always" {
+		t.Errorf("missing restart policy = %q", got)
+	}
+	config := persistedStartConfig{Version: 1, Restart: "on-failure"}
+	if err := a.writeServiceConfig("api", config); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.savedRestartPolicy("api"); got != "on-failure" {
+		t.Errorf("saved restart policy = %q", got)
+	}
+}

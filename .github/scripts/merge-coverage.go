@@ -52,10 +52,11 @@ func main() {
 				_ = file.Close()
 				fatal(fmt.Errorf("invalid coverage count in %s: %w", path, err))
 			}
-			if _, exists := counts[key]; !exists {
+			existing, exists := counts[key]
+			if !exists {
 				order = append(order, key)
-			}
-			if count > counts[key] {
+				counts[key] = count
+			} else if count > existing {
 				counts[key] = count
 			}
 		}

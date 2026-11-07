@@ -71,7 +71,7 @@ curl -fsSL https://raw.githubusercontent.com/eyvant/spm/main/install.sh | \
   sh -s -- --version v0.1.0
 ```
 
-Or install from source with Go 1.21 or later:
+Or install from source with Go 1.26 or later:
 
 ```bash
 go install github.com/eyvant/spm/cmd/spm@latest
