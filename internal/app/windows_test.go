@@ -510,7 +510,10 @@ func TestWindowsDeclarationInspectionAndDryRun(t *testing.T) {
 }
 
 func TestWindowsSupervisorAndWaitFailurePaths(t *testing.T) {
-	root := localTempDir(t)
+	root, err := filepath.Abs(localTempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	b := &windowsBackend{root: root, stdout: io.Discard, stderr: io.Discard}
 	config := windowsServiceConfig{Version: windowsStateVersion, Name: "once", Cwd: root, Command: []string{"cmd.exe", "/d", "/c", "exit", "0"}, Restart: "no", RestartSec: "0s"}
 	if err := b.writeConfig(config); err != nil {
@@ -755,7 +758,10 @@ func TestWindowsScheduledCommandBoundaries(t *testing.T) {
 		return exec.Command("cmd.exe", "/d", "/c", "exit 0")
 	}
 
-	root := localTempDir(t)
+	root, err := filepath.Abs(localTempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	b := &windowsBackend{root: root, stdout: io.Discard, stderr: io.Discard}
 	if err := os.MkdirAll(b.serviceDir("job"), 0o755); err != nil {
 		t.Fatal(err)
@@ -777,6 +783,20 @@ func TestWindowsScheduledCommandBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := b.inspectSCMService("job", io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("APPDATA", filepath.Join(root, "appdata"))
+	if err := b.schedule([]string{"--name", "nightly", "--interval", "1min", "--on-boot", "1min", "--run-now", "--", "go", "version"}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := b.readConfig("nightly")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.setScheduledEnabled(saved, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.unregisterScheduledTask("nightly"); err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(calls, "\n")

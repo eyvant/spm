@@ -52,7 +52,7 @@ jobs:
         with:
           version: "2026.2.2"
           install-go: false
-          min-go-version: "1.26"
+          min-go-version: "1.27"
           checks: "inherit,-U1000"
           cache-key: ${{ matrix.runner }}
 
@@ -102,7 +102,8 @@ jobs:
           $coverage = [double]$Matches[1]
           "Combined statement coverage: $coverage%"
           if ($coverage -lt 80.0) {
-            throw "Combined coverage $coverage% is below the 80.0% floor"
+            Write-Output "::error title=Coverage below floor::Combined coverage $coverage% is below the 80.0% floor"
+            exit 1
           }
           "### Windows ${{ matrix.name }} combined coverage: $coverage%" >> $env:GITHUB_STEP_SUMMARY
 

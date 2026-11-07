@@ -20,7 +20,7 @@ jobs:
       matrix:
         include:
           - os: macos-15-intel
-            go: 1.26.x
+            go: 1.27.x
             e2e: full
           - os: macos-26-intel
             go: stable
@@ -54,7 +54,7 @@ jobs:
         with:
           version: "2026.2.2"
           install-go: false
-          min-go-version: "1.26"
+          min-go-version: "1.27"
           checks: "inherit,-U1000"
           cache-key: ${{ matrix.go }}
 
@@ -108,7 +108,10 @@ jobs:
         run: |
           coverage=$(go tool cover -func=combined-coverage.out | awk '/^total:/ { gsub(/%/, "", $3); print $3 }')
           echo "Combined statement coverage: ${coverage}%"
-          awk -v coverage="$coverage" 'BEGIN { if (coverage + 0 < 80.0) { printf "Combined coverage %.1f%% is below the 80.0%% floor\n", coverage; exit 1 } }'
+          if ! awk -v coverage="$coverage" 'BEGIN { exit !(coverage + 0 >= 80.0) }'; then
+            echo "::error title=Coverage below floor::Combined coverage ${coverage}% is below the 80.0% floor"
+            exit 1
+          fi
           echo "### macOS ${{ matrix.os }} / Go ${{ matrix.go }} combined coverage: ${coverage}%" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload coverage profiles

@@ -400,7 +400,7 @@ func (b *windowsBackend) refreshScheduleDaemon() error {
 			return err
 		}
 	}
-	command := exec.Command("schtasks.exe", "/Run", "/TN", name)
+	command := windowsExecCommand("schtasks.exe", "/Run", "/TN", name)
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("start scheduler: %s: %w", strings.TrimSpace(string(output)), err)
@@ -439,7 +439,7 @@ func renderWindowsScheduleDaemonTask(launcherPath, principal, logonType string, 
 }
 
 func (b *windowsBackend) endScheduledTask(name string) error {
-	command := exec.Command("schtasks.exe", "/End", "/TN", name)
+	command := windowsExecCommand("schtasks.exe", "/End", "/TN", name)
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	_ = command.Run()
 	return nil
