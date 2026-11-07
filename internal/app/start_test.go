@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -1027,6 +1028,50 @@ func TestActivationSnapshotRestoreAndWaitBranches(t *testing.T) {
 	}
 	if err := a.waitForUnitActive(unitName("api"), time.Second); err == nil {
 		t.Fatal("failed service unexpectedly became active")
+	}
+}
+
+func TestIdentityHomeShebangAndUnitDirectoryHelpers(t *testing.T) {
+	for value, want := range map[string]bool{"": false, "123": true, "12a": false, "-1": false} {
+		if got := isNumericIdentity(value); got != want {
+			t.Errorf("isNumericIdentity(%q) = %t, want %t", value, got, want)
+		}
+	}
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := systemUserHome(current.Username)
+	if err != nil || home == "" {
+		t.Errorf("systemUserHome(%q) = %q, %v", current.Username, home, err)
+	}
+	if _, err := systemUserHome("spm-user-that-does-not-exist"); err == nil {
+		t.Fatal("missing system user unexpectedly resolved")
+	}
+	if _, err := systemUserHome("999999999"); err == nil {
+		t.Fatal("missing numeric system user unexpectedly resolved")
+	}
+
+	directory := localTempDir(t)
+	script := filepath.Join(directory, "script")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho ok\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !hasShebang(script) || hasShebang(filepath.Join(directory, "missing")) {
+		t.Fatal("shebang detection is incorrect")
+	}
+	t.Setenv("XDG_CONFIG_HOME", "relative")
+	if _, err := userUnitDir(); err == nil {
+		t.Fatal("relative XDG_CONFIG_HOME unexpectedly accepted")
+	}
+	absolute, err := filepath.Abs(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", absolute)
+	unitDir, err := userUnitDir()
+	if err != nil || unitDir != filepath.Join(absolute, "systemd", "user") {
+		t.Fatalf("userUnitDir = %q, %v", unitDir, err)
 	}
 }
 

@@ -27,6 +27,15 @@ func TestProbeValidation(t *testing.T) {
 	}
 }
 
+func TestWaitForProbeSuccessAndTimeout(t *testing.T) {
+	if err := waitForProbe(probeConfig{Kind: "command", Target: "go version", Timeout: "1s"}, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForProbe(probeConfig{Kind: "command", Target: "go version"}, 0); err == nil {
+		t.Fatal("zero-timeout probe unexpectedly succeeded")
+	}
+}
+
 func TestProbeValidationRejectsInvalidConfiguration(t *testing.T) {
 	tests := []struct {
 		name  string
