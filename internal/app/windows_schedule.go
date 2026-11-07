@@ -37,7 +37,7 @@ func (b *windowsBackend) scheduleTaskName(name, kind string) string {
 }
 
 func triggerWindowsScheduledTask(name string) error {
-	command := exec.Command("schtasks.exe", "/Run", "/TN", "spm-"+name+"-schedule")
+	command := windowsExecCommand("schtasks.exe", "/Run", "/TN", "spm-"+name+"-schedule")
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
@@ -266,7 +266,7 @@ func (b *windowsBackend) createScheduledTask(name, xml string) error {
 		return err
 	}
 	// schtasks expects UTF-16 when the XML declaration says UTF-16.
-	for _, value := range []rune(xml) {
+	for _, value := range xml {
 		encoded := utf16.Encode([]rune{value})
 		for _, unit := range encoded {
 			if _, err := file.Write([]byte{byte(unit), byte(unit >> 8)}); err != nil {
@@ -278,7 +278,7 @@ func (b *windowsBackend) createScheduledTask(name, xml string) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
-	command := exec.Command("schtasks.exe", "/Create", "/TN", name, "/XML", path, "/F")
+	command := windowsExecCommand("schtasks.exe", "/Create", "/TN", name, "/XML", path, "/F")
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("register scheduled task %s: %s: %w", name, strings.TrimSpace(string(output)), err)
@@ -287,12 +287,12 @@ func (b *windowsBackend) createScheduledTask(name, xml string) error {
 }
 
 func (b *windowsBackend) deleteScheduledTask(name string) error {
-	query := exec.Command("schtasks.exe", "/Query", "/TN", name)
+	query := windowsExecCommand("schtasks.exe", "/Query", "/TN", name)
 	query.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if err := query.Run(); err != nil {
 		return nil
 	}
-	command := exec.Command("schtasks.exe", "/Delete", "/TN", name, "/F")
+	command := windowsExecCommand("schtasks.exe", "/Delete", "/TN", name, "/F")
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("delete scheduled task %s: %s: %w", name, strings.TrimSpace(string(output)), err)
@@ -354,7 +354,7 @@ func (b *windowsBackend) registerUserScheduleDaemonStartup(taskName string) erro
 		return fmt.Errorf("find schtasks.exe: %w", err)
 	}
 	arguments := "/Run /TN " + windowsQuoteCommand(taskName)
-	cmd := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", windowsCreateShortcutScript)
+	cmd := windowsExecCommand("powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", windowsCreateShortcutScript)
 	cmd.Env = append(os.Environ(), "SPM_SHORTCUT_PATH="+b.scheduleDaemonStartupPath(), "SPM_SHORTCUT_TARGET="+target, "SPM_SHORTCUT_ARGS="+arguments, "SPM_SHORTCUT_DESCRIPTION=Start the spm user scheduler at logon")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -400,7 +400,7 @@ func (b *windowsBackend) refreshScheduleDaemon() error {
 			return err
 		}
 	}
-	command := exec.Command("schtasks.exe", "/Run", "/TN", name)
+	command := windowsExecCommand("schtasks.exe", "/Run", "/TN", name)
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("start scheduler: %s: %w", strings.TrimSpace(string(output)), err)
@@ -439,7 +439,7 @@ func renderWindowsScheduleDaemonTask(launcherPath, principal, logonType string, 
 }
 
 func (b *windowsBackend) endScheduledTask(name string) error {
-	command := exec.Command("schtasks.exe", "/End", "/TN", name)
+	command := windowsExecCommand("schtasks.exe", "/End", "/TN", name)
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	_ = command.Run()
 	return nil

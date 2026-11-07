@@ -37,13 +37,31 @@ jobs:
             go.sum
 
       - name: Test
-        run: go test -cover ./...
+        run: go test -covermode atomic -coverprofile coverage.out ./...
+
+      - name: Show unit-test coverage
+        shell: pwsh
+        run: |
+          go tool cover -func coverage.out
 
       - name: Vet
         run: go vet ./...
 
+      - name: Staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          version: "2026.2.2"
+          install-go: false
+          min-go-version: "1.27"
+          checks: "inherit,-U1000"
+          cache-key: ${{ matrix.runner }}
+
       - name: Build
-        run: go build -buildvcs=false -o spm.exe ./cmd/spm
+        run: go build -cover -covermode atomic -buildvcs=false -o spm.exe ./cmd/spm
+
+      - name: Prepare E2E coverage directory
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force (Join-Path $env:RUNNER_TEMP 'spm-e2e-coverage') | Out-Null
 
       - name: Test installer
         shell: pwsh
@@ -53,6 +71,7 @@ jobs:
         shell: pwsh
         env:
           SPM_CI_PREFIX: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.runner }}
+          GOCOVERDIR: ${{ runner.temp }}\spm-e2e-coverage
         run: |
           .\scripts\ci-windows-e2e.ps1 -Spm .\spm.exe -Scope User -Prefix $env:SPM_CI_PREFIX
 
@@ -60,5 +79,39 @@ jobs:
         shell: pwsh
         env:
           SPM_CI_PREFIX: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.runner }}
+          GOCOVERDIR: ${{ runner.temp }}\spm-e2e-coverage
         run: |
           .\scripts\ci-windows-e2e.ps1 -Spm .\spm.exe -Scope System -Prefix $env:SPM_CI_PREFIX
+
+      - name: Merge unit and E2E coverage
+        shell: pwsh
+        env:
+          GOCOVERDIR: ${{ runner.temp }}\spm-e2e-coverage
+        run: |
+          go tool covdata textfmt -i $env:GOCOVERDIR -o e2e-coverage.out
+          go run .github/scripts/merge-coverage.go -o combined-coverage.out coverage.out e2e-coverage.out
+          go tool cover -func combined-coverage.out
+
+      - name: Enforce combined coverage floor
+        shell: pwsh
+        run: |
+          $total = (go tool cover -func combined-coverage.out | Select-String '^total:').Line
+          if ($total -notmatch '([0-9.]+)%$') {
+            throw "Could not parse total coverage from: $total"
+          }
+          $coverage = [double]$Matches[1]
+          "Combined statement coverage: $coverage%"
+          if ($coverage -lt 80.0) {
+            Write-Output "::error title=Coverage below floor::Combined coverage $coverage% is below the 80.0% floor"
+            exit 1
+          }
+          "### Windows ${{ matrix.name }} combined coverage: $coverage%" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload coverage profiles
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-windows-${{ matrix.runner }}
+          path: "*coverage.out"
+          if-no-files-found: error
+          retention-days: 14

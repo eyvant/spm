@@ -37,7 +37,7 @@ jobs:
       - name: Run tests with race detector
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
 
-      - name: Show coverage
+      - name: Show unit-test coverage
         run: go tool cover -func=coverage.out
 
       - name: Run vet
@@ -47,19 +47,26 @@ jobs:
         run: sh scripts/test-install-sh.sh
 
       - name: Build spm
-        run: go build -buildvcs=false -o spm ./cmd/spm
+        run: go build -cover -covermode=atomic -buildvcs=false -o spm ./cmd/spm
+
+      - name: Prepare E2E coverage directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/spm-e2e-coverage"
+          chmod 0777 "$RUNNER_TEMP/spm-e2e-coverage"
 
       - name: Run real systemd integration test
         env:
           SPM_CI_PREFIX: ci-${{ github.run_id }}-${{ github.run_attempt }}
+          GOCOVERDIR: ${{ runner.temp }}/spm-e2e-coverage
         run: |
           sudo install -m 0755 ./spm /usr/local/bin/spm-ci
           trap 'sudo rm -f /usr/local/bin/spm-ci' EXIT
-          sudo --preserve-env=SPM_CI_PREFIX bash scripts/ci-systemd-e2e.sh /usr/local/bin/spm-ci
+          sudo --preserve-env=SPM_CI_PREFIX,GOCOVERDIR bash scripts/ci-systemd-e2e.sh /usr/local/bin/spm-ci
 
       - name: Run real user-systemd integration test
         env:
           SPM_CI_PREFIX: ci-user-${{ github.run_id }}-${{ github.run_attempt }}
+          GOCOVERDIR: ${{ runner.temp }}/spm-e2e-coverage
         run: |
           uid=$(id -u)
           sudo loginctl enable-linger "$USER"
@@ -67,6 +74,33 @@ jobs:
           export XDG_RUNTIME_DIR="/run/user/$uid"
           systemctl --user daemon-reload
           bash scripts/ci-linux-user-e2e.sh ./spm
+
+      - name: Merge unit and E2E coverage
+        shell: bash
+        run: |
+          go tool covdata textfmt -i="$RUNNER_TEMP/spm-e2e-coverage" -o=e2e-coverage.out
+          go run .github/scripts/merge-coverage.go -o combined-coverage.out coverage.out e2e-coverage.out
+          go tool cover -func=combined-coverage.out
+
+      - name: Enforce combined coverage floor
+        shell: bash
+        run: |
+          coverage=$(go tool cover -func=combined-coverage.out | awk '/^total:/ { gsub(/%/, "", $3); print $3 }')
+          echo "Combined statement coverage: ${coverage}%"
+          if ! awk -v coverage="$coverage" 'BEGIN { exit !(coverage + 0 >= 80.0) }'; then
+            echo "::error title=Coverage below floor::Combined coverage ${coverage}% is below the 80.0% floor"
+            exit 1
+          fi
+          echo "### Linux ${{ matrix.os }} combined coverage: ${coverage}%" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage profiles
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-linux-${{ matrix.os }}
+          path: "*coverage.out"
+          if-no-files-found: error
+          retention-days: 14
 
   compatibility:
     name: Unit compatibility (${{ matrix.distro }})
@@ -129,3 +163,43 @@ jobs:
 
       - name: Build spm
         run: go build -buildvcs=false -o spm ./cmd/spm
+
+  quality:
+    name: Static analysis, vulnerabilities, and fuzz smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up current Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: |
+            go.mod
+            go.sum
+
+      - name: Verify module checksums
+        run: go mod verify
+
+      - name: Run Staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          version: "2026.2.2"
+          install-go: false
+          min-go-version: "1.27"
+          checks: "inherit,-U1000"
+
+      - name: Scan reachable vulnerabilities
+        uses: golang/govulncheck-action@v1
+        with:
+          repo-checkout: false
+          go-version-input: stable
+          go-package: ./...
+
+      - name: Fuzz cron parsing
+        run: go test ./internal/app -run=^$ -fuzz=^FuzzParseCronExpression$ -fuzztime=10s
+
+      - name: Fuzz MCP argument decoding
+        run: go test ./internal/app -run=^$ -fuzz=^FuzzDecodeMCPArguments$ -fuzztime=10s

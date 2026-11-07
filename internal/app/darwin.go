@@ -21,6 +21,8 @@ import (
 
 const darwinConfigVersion = 1
 
+var darwinExecCommand = exec.Command
+
 type darwinServiceConfig struct {
 	Version          int      `json:"version"`
 	Name             string   `json:"name"`
@@ -65,7 +67,7 @@ func runDarwin(args []string, stdout, stderr io.Writer, system bool) error {
 		log, closeLog := openPortableSchedulerLog(root, stderr)
 		defer closeLog()
 		return runPortableScheduler(context.Background(), root, func(name string) error {
-			command := exec.Command("launchctl", "kickstart", domain+"/com.eyvant.spm."+name)
+			command := darwinExecCommand("launchctl", "kickstart", domain+"/com.eyvant.spm."+name)
 			if output, err := command.CombinedOutput(); err != nil {
 				return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
 			}
@@ -499,7 +501,7 @@ func darwinEnvironment(config darwinServiceConfig) map[string]string {
 }
 
 func (b *darwinBackend) launchctl(args ...string) ([]byte, error) {
-	cmd := exec.Command("launchctl", args...)
+	cmd := darwinExecCommand("launchctl", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return output, fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
@@ -903,7 +905,7 @@ func (b *darwinBackend) native(args []string) error {
 		if err != nil {
 			return err
 		}
-		cmd := exec.Command("launchctl", "print", b.target(name))
+		cmd := darwinExecCommand("launchctl", "print", b.target(name))
 		cmd.Stdout, cmd.Stderr = b.stdout, b.stderr
 		return cmd.Run()
 	}

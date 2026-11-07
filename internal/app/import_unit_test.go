@@ -1,9 +1,11 @@
 package app
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -55,6 +57,35 @@ func TestParseSystemdUnitKeepsNotifyAndForkingTypes(t *testing.T) {
 		}
 		if config.Type != test.wantType || config.PIDFile != test.wantPID {
 			t.Errorf("parseSystemdUnit(%q) type=%q pid=%q", test.unit, config.Type, config.PIDFile)
+		}
+	}
+}
+
+func TestImportUnitInstallsAndValidatesArguments(t *testing.T) {
+	directory := localTempDir(t)
+	sourceDirectory := filepath.Join(directory, "source")
+	if err := os.MkdirAll(sourceDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(sourceDirectory, "spm-imported.service")
+	data := []byte("[Unit]\nDescription=Imported service\n[Service]\nType=exec\nExecStart=go version\nWorkingDirectory=" + directory + "\nRestart=always\n[Install]\nWantedBy=default.target\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &application{runner: &fakeRunner{}, stdout: io.Discard, stderr: io.Discard, unitDir: directory, configDir: filepath.Join(directory, "config")}
+	if err := a.importUnit([]string{path}); err != nil {
+		t.Fatal(err)
+	}
+	config, err := a.readServiceConfig("imported")
+	if err != nil || config.Description != "Imported service" || len(config.Command) != 2 {
+		t.Fatalf("imported config = %#v, %v", config, err)
+	}
+	if err := a.importUnit([]string{path}); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("duplicate import error = %v", err)
+	}
+	for _, args := range [][]string{nil, {path, "--bad", "name"}, {path, "--name", "bad/name"}} {
+		if err := a.importUnit(args); err == nil {
+			t.Errorf("importUnit(%v) unexpectedly succeeded", args)
 		}
 	}
 }

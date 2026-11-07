@@ -22,6 +22,8 @@ import (
 
 const windowsServicePrefix = "spm-"
 
+var windowsExecCommand = exec.Command
+
 func windowsIsElevated() bool { return windows.GetCurrentProcessToken().IsElevated() }
 
 type windowsSCMHandler struct {
@@ -186,7 +188,7 @@ try {
 } finally {
     if ($pointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer) }
 }`
-	cmd := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
+	cmd := windowsExecCommand("powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
 	cmd.Env = append(os.Environ(), "SPM_SERVICE_ACCOUNT="+account)
 	cmd.Stdin, cmd.Stderr = os.Stdin, b.stderr
 	var output bytes.Buffer
@@ -196,7 +198,7 @@ try {
 	}
 	password := output.String()
 	if password == "" {
-		return "", errors.New("Windows service account password cannot be empty")
+		return "", errors.New("windows service account password cannot be empty")
 	}
 	return password, nil
 }
@@ -258,7 +260,7 @@ func (b *windowsBackend) startSCMService(name string) error {
 			return b.waitRunning(name, 10*time.Second)
 		}
 		if status.State == svc.Stopped {
-			return fmt.Errorf("Windows service %s stopped during startup (win32=%d, service=%d)", b.scmName(name), status.Win32ExitCode, status.ServiceSpecificExitCode)
+			return fmt.Errorf("windows service %s stopped during startup (win32=%d, service=%d)", b.scmName(name), status.Win32ExitCode, status.ServiceSpecificExitCode)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -335,12 +337,12 @@ func (b *windowsBackend) stopLegacySystemTask(name string) error {
 
 func (b *windowsBackend) removeLegacySystemTask(name string) error {
 	taskName := "spm-system-" + name
-	query := exec.Command("schtasks.exe", "/Query", "/TN", taskName)
+	query := windowsExecCommand("schtasks.exe", "/Query", "/TN", taskName)
 	query.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if err := query.Run(); err != nil {
 		return nil
 	}
-	cmd := exec.Command("schtasks.exe", "/Delete", "/TN", taskName, "/F")
+	cmd := windowsExecCommand("schtasks.exe", "/Delete", "/TN", taskName, "/F")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -351,7 +353,7 @@ func (b *windowsBackend) removeLegacySystemTask(name string) error {
 
 func (b *windowsBackend) inspectSCMService(name string, stdout, stderr io.Writer) error {
 	for _, command := range [][]string{{"queryex", b.scmName(name)}, {"qc", b.scmName(name)}} {
-		cmd := exec.Command("sc.exe", command...)
+		cmd := windowsExecCommand("sc.exe", command...)
 		cmd.Stdout, cmd.Stderr = stdout, stderr
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		if err := cmd.Run(); err != nil {

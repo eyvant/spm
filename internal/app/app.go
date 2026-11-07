@@ -347,6 +347,10 @@ func printHelp(w io.Writer) {
 	if printPlatformHelp(w) {
 		return
 	}
+	printGenericHelp(w)
+}
+
+func printGenericHelp(w io.Writer) {
 	fmt.Fprint(w, `spm - a simple, cross-platform manager for native system services
 
 Usage:
@@ -479,6 +483,10 @@ func printCommandHelp(w io.Writer, command string) error {
 	if printPlatformCommandHelp(w, command) {
 		return nil
 	}
+	return printGenericCommandHelp(w, command)
+}
+
+func printGenericCommandHelp(w io.Writer, command string) error {
 	switch command {
 	case "start":
 		fmt.Fprint(w, `Usage:
@@ -1224,21 +1232,6 @@ func (a *application) managedNames() ([]string, error) {
 
 func (a *application) readState(name string) serviceState {
 	return a.readUnitStates([]string{unitName(name)})[unitName(name)]
-}
-
-func (a *application) readStates(names []string) map[string]serviceState {
-	units := make([]string, len(names))
-	for i, name := range names {
-		units[i] = unitName(name)
-	}
-	unitStates := a.readUnitStates(units)
-	states := make(map[string]serviceState, len(names))
-	for _, name := range names {
-		if state, ok := unitStates[unitName(name)]; ok {
-			states[name] = state
-		}
-	}
-	return states
 }
 
 // readUnitStates reads the runtime state of service units with one

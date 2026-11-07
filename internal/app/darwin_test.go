@@ -3,7 +3,10 @@
 package app
 
 import (
+	"bytes"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -118,5 +121,182 @@ func TestDarwinScheduledDeclarationIsPortable(t *testing.T) {
 	}
 	if config.Mode != "schedule" || config.Schedule != service.Schedule || config.Timezone != service.Timezone || !config.Persistent {
 		t.Fatalf("unexpected schedule config: %#v", config)
+	}
+}
+
+func TestDarwinLocalManagementAndReporting(t *testing.T) {
+	root := t.TempDir()
+	plists := filepath.Join(root, "plists")
+	var output bytes.Buffer
+	b := &darwinBackend{root: root, plistDir: plists, uid: os.Getuid(), stdout: &output, stderr: io.Discard}
+	regular := darwinServiceConfig{Version: darwinConfigVersion, Name: "api", Cwd: root, Command: []string{"/usr/bin/true"}, Restart: "no", RestartSec: "1s", Enabled: true}
+	scheduled := darwinServiceConfig{Version: darwinConfigVersion, Name: "backup", Cwd: root, Command: []string{"/usr/bin/true"}, Restart: "no", RestartSec: "1s", Enabled: true, Mode: "schedule", Schedule: "0 * * * *"}
+	for _, config := range []darwinServiceConfig{scheduled, regular} {
+		if err := b.writeConfig(config); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if names, err := b.names(); err != nil || strings.Join(names, ",") != "api,backup" {
+		t.Fatalf("names = %v, %v", names, err)
+	}
+	if err := b.list(listOptions{json: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"name": "api"`, `"name": "backup"`, `"schedule": "0 * * * *"`} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("list output does not contain %q: %s", want, output.String())
+		}
+	}
+	output.Reset()
+	if err := b.status("backup"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "waiting") || !strings.Contains(output.String(), "0 * * * *") {
+		t.Fatalf("schedule status: %s", output.String())
+	}
+	output.Reset()
+	if err := b.status("api"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "launchd") || !strings.Contains(output.String(), "/usr/bin/true") {
+		t.Fatalf("service status: %s", output.String())
+	}
+	if err := os.WriteFile(b.logPath("api"), []byte("first\nmatch this\nlast\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := b.logs([]string{"--lines", "2", "--grep", "match", "api"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "match this") || strings.Contains(got, "last") {
+		t.Fatalf("filtered logs: %q", got)
+	}
+	for _, args := range [][]string{{"list", "--json"}, {"status", "api"}, {"logs", "--lines", "1", "api"}, {"doctor"}} {
+		if err := b.run(args); err != nil {
+			t.Errorf("run(%v): %v", args, err)
+		}
+	}
+	for _, args := range [][]string{{"status"}, {"native"}, {"unknown"}} {
+		if err := b.run(args); err == nil {
+			t.Errorf("run(%v) unexpectedly succeeded", args)
+		}
+	}
+	for _, selectors := range [][]string{nil, {"all", "api"}, {"missing"}, {"bad/name"}} {
+		if _, err := b.selectNames(selectors); err == nil {
+			t.Errorf("selectNames(%v) unexpectedly succeeded", selectors)
+		}
+	}
+	if err := b.removeMany([]string{"all"}); err == nil {
+		t.Fatal("remove all without confirmation unexpectedly succeeded")
+	}
+	output.Reset()
+	if err := b.removeMany([]string{"api"}); err != nil {
+		t.Fatal(err)
+	}
+	if b.exists("api") || !strings.Contains(output.String(), "api deleted") {
+		t.Fatalf("regular service was not deleted: %s", output.String())
+	}
+}
+
+func TestDarwinEnvironmentAndRejectedOptions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "service.env")
+	if err := os.WriteFile(path, []byte("# comment\nA=from-file\nQUOTED='hello world'\nINVALID\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := darwinEnvironment(darwinServiceConfig{EnvFile: path, Env: []string{"A=override", "B=value", "INVALID"}})
+	if env["A"] != "override" || env["B"] != "value" || env["QUOTED"] != "hello world" {
+		t.Fatalf("environment = %#v", env)
+	}
+	options := []startOptions{
+		{startLimitBurst: "2"}, {cronRestart: "* * * * *"}, {maxMemory: "1G"},
+		{execStartPre: []string{"true"}}, {onFailure: []string{"notify"}},
+		{health: healthConfig{Probe: probeConfig{Kind: "http"}}}, {serviceType: "forking"},
+		{pidFile: "/tmp/pid"}, {timezone: "UTC"}, {instances: 2}, {sandbox: "strict"},
+	}
+	for _, option := range options {
+		if err := rejectDarwinStartOptions(option); err == nil {
+			t.Errorf("options %#v unexpectedly accepted", option)
+		}
+	}
+	if err := rejectDarwinStartOptions(startOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDarwinDeclarationPlans(t *testing.T) {
+	root := t.TempDir()
+	var output bytes.Buffer
+	b := &darwinBackend{root: root, plistDir: filepath.Join(root, "plists"), uid: os.Getuid(), stdout: &output, stderr: io.Discard}
+	services := []serviceDeclaration{{Name: "api", Command: []string{"/usr/bin/true"}}}
+	if err := b.printDeclarationPlan(services, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "create\tapi") {
+		t.Fatalf("create plan: %s", output.String())
+	}
+	desired, err := b.prepareDeclaration(services[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.writeConfig(desired); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := b.printDeclarationPlan(services, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "unchanged\tapi") {
+		t.Fatalf("unchanged plan: %s", output.String())
+	}
+	services[0].Description = "changed"
+	output.Reset()
+	if err := b.printDeclarationPlan(services, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"update\tapi", "-  config =", "+  config ="} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("detailed update plan missing %q: %s", want, output.String())
+		}
+	}
+}
+
+func TestDarwinNativeLifecycleWithCommandBoundary(t *testing.T) {
+	original := darwinExecCommand
+	darwinExecCommand = func(string, ...string) *exec.Cmd {
+		return exec.Command("/bin/sh", "-c", "printf 'state = running\\npid = 123\\nruns = 1\\n'")
+	}
+	t.Cleanup(func() { darwinExecCommand = original })
+	root := t.TempDir()
+	var output bytes.Buffer
+	b := &darwinBackend{root: root, plistDir: filepath.Join(root, "plists"), uid: os.Getuid(), stdout: &output, stderr: io.Discard}
+	if err := b.start([]string{"--name", "api", "--no-enable", "--", "go", "version"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"restart", "stop", "enable", "disable"} {
+		if err := b.controlMany(action, []string{"api"}); err != nil {
+			t.Fatalf("%s service: %v", action, err)
+		}
+	}
+	if err := b.native([]string{"launchd", "print", "api"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.schedule([]string{"--name", "job", "--interval", "5min", "--on-boot", "1min", "--", "go", "version"}); err != nil {
+		t.Fatal(err)
+	}
+	config, err := b.readConfig("job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, enabled := range []bool{false, true} {
+		if err := b.setScheduledEnabled(config, enabled); err != nil {
+			t.Fatal(err)
+		}
+		config.Enabled = enabled
+	}
+	if err := b.removeMany([]string{"api", "job"}); err != nil {
+		t.Fatal(err)
+	}
+	if b.exists("api") || b.exists("job") {
+		t.Fatal("services survived removal")
 	}
 }

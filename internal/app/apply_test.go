@@ -1,10 +1,12 @@
 package app
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -197,6 +199,117 @@ func TestApplyDryRunDoesNotWriteUnits(t *testing.T) {
 	}
 	if a.exists("api") {
 		t.Fatal("dry-run wrote a unit")
+	}
+}
+
+func TestInspectDeclarationValidateDiffAndUpdate(t *testing.T) {
+	directory := localTempDir(t)
+	path := filepath.Join(directory, "spm.toml")
+	write := func(description string) {
+		data := "[[services]]\nname = \"api\"\ncommand = [\"go\", \"version\"]\nrestart_sec = \"4s\"\n"
+		if description != "" {
+			data += "description = \"" + description + "\"\n"
+		}
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("")
+	var output strings.Builder
+	a := &application{runner: &fakeRunner{}, stdout: &output, stderr: io.Discard, unitDir: directory, configDir: filepath.Join(directory, "config")}
+	if err := a.inspectDeclaration("validate", []string{path}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "is valid") {
+		t.Fatalf("validate output = %q", output.String())
+	}
+	output.Reset()
+	if err := a.inspectDeclaration("diff", []string{path}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "create\tapi") {
+		t.Fatalf("create diff = %q", output.String())
+	}
+	if err := a.apply([]string{path}); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := a.inspectDeclaration("diff", []string{path}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "unchanged\tapi") {
+		t.Fatalf("unchanged diff = %q", output.String())
+	}
+	write("updated")
+	output.Reset()
+	if err := a.inspectDeclaration("diff", []string{path}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "update\tapi") || !strings.Contains(output.String(), "+  description = \"updated\"") {
+		t.Fatalf("update diff = %q", output.String())
+	}
+	for _, args := range [][]string{nil, {path, path}} {
+		if err := a.inspectDeclaration("validate", args); err == nil {
+			t.Errorf("inspectDeclaration(%v) unexpectedly succeeded", args)
+		}
+	}
+}
+
+func TestApplyArgumentErrors(t *testing.T) {
+	a := &application{stdout: io.Discard, stderr: io.Discard}
+	for _, args := range [][]string{nil, {"--unknown"}, {"one.toml", "two.toml"}} {
+		if err := a.apply(args); err == nil {
+			t.Errorf("apply(%v) unexpectedly succeeded", args)
+		}
+	}
+}
+
+func TestSetDeclarationValueCoversAllKeys(t *testing.T) {
+	service := &serviceDeclaration{}
+	stringsByKey := map[string]string{
+		"name": "api", "cwd": "/srv/api", "description": "API", "restart": "always", "restart_sec": "3s",
+		"start_limit_interval": "30s", "start_limit_burst": "5", "cron_restart": "*/5 * * * *", "env_file": ".env",
+		"interpreter": "node", "max_memory": "128M", "user": "svc", "group": "svc", "type": "forking",
+		"pid_file": "/tmp/api.pid", "timezone": "UTC", "script": "server.js", "exec_stop": "stop", "exec_reload": "reload",
+		"schedule": "0 * * * *", "timer_on_boot": "1min", "timer_interval": "5min", "timer_randomized_delay": "30s",
+		"health_http": "http://localhost/health", "health_tcp": "localhost:80", "health_command": "echo ok",
+		"health_interval": "30s", "health_timeout": "5s", "health_retry_delay": "1s", "health_start_period": "10s", "health_action": "restart",
+	}
+	for key, value := range stringsByKey {
+		if err := setDeclarationValue(service, key, strconv.Quote(value)); err != nil {
+			t.Errorf("setDeclarationValue(%s): %v", key, err)
+		}
+	}
+	arraysByKey := map[string][]string{
+		"command": {"node", "server.js"}, "args": {"--port", "3000"}, "env": {"PORT=3000"}, "properties": {"Nice=5"},
+		"exec_start_pre": {"echo pre"}, "exec_start_post": {"echo post"}, "after": {"network.target"}, "wants": {"cache.service"},
+		"requires": {"db.service"}, "on_failure": {"notify.service"},
+	}
+	for key, value := range arraysByKey {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := setDeclarationValue(service, key, string(raw)); err != nil {
+			t.Errorf("setDeclarationValue(%s): %v", key, err)
+		}
+	}
+	for key, raw := range map[string]string{"instances": "2", "health_retries": "3", "persistent": "true", "mise": "true", "enable": "false"} {
+		if err := setDeclarationValue(service, key, raw); err != nil {
+			t.Errorf("setDeclarationValue(%s): %v", key, err)
+		}
+	}
+	for key, raw := range map[string]string{
+		"name": "unquoted", "command": "bad", "instances": "-1", "health_retries": "0", "persistent": "maybe", "mise": "maybe", "enable": "maybe", "missing": `"value"`,
+	} {
+		if err := setDeclarationValue(&serviceDeclaration{}, key, raw); err == nil {
+			t.Errorf("invalid %s=%s unexpectedly succeeded", key, raw)
+		}
+	}
+	for _, line := range []string{`value = "# retained" # removed`, `value = "escaped \" # retained" # removed`, "value = 1 # removed", "value = 1"} {
+		if got := stripTOMLComment(line); strings.Contains(got, "removed") {
+			t.Errorf("stripTOMLComment(%q) = %q", line, got)
+		}
 	}
 }
 
