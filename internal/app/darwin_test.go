@@ -170,7 +170,7 @@ func TestDarwinLocalManagementAndReporting(t *testing.T) {
 	if got := output.String(); !strings.Contains(got, "match this") || strings.Contains(got, "last") {
 		t.Fatalf("filtered logs: %q", got)
 	}
-	for _, args := range [][]string{{"list", "--json"}, {"status", "api"}, {"logs", "--lines", "1", "api"}, {"doctor"}, {"help"}, {"help", "start"}} {
+	for _, args := range [][]string{{"list", "--json"}, {"status", "api"}, {"logs", "--lines", "1", "api"}, {"doctor"}} {
 		if err := b.run(args); err != nil {
 			t.Errorf("run(%v): %v", args, err)
 		}

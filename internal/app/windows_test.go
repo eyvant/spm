@@ -801,7 +801,30 @@ func TestWindowsScheduledCommandBoundaries(t *testing.T) {
 	if err := b.registerUserStartup("job", os.Args[0]); err != nil {
 		t.Fatal(err)
 	}
+	for _, account := range []string{"SYSTEM", `NT AUTHORITY\LOCALSERVICE`, `NT AUTHORITY\NETWORKSERVICE`, `DOMAIN\svc`} {
+		if err := b.secureSystemData("job", account); err != nil {
+			t.Fatalf("secure data for %s: %v", account, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"--name", "bad-group", "--interval", "1min", "--group", "staff", "--", "go", "version"},
+		{"--name", "bad-health", "--interval", "1min", "--health-http", "http://127.0.0.1", "--", "go", "version"},
+	} {
+		if err := b.schedule(args); err == nil {
+			t.Errorf("schedule(%v) unexpectedly succeeded", args)
+		}
+	}
 	if err := b.schedule([]string{"--name", "nightly", "--interval", "1min", "--on-boot", "1min", "--run-now", "--", "go", "version"}); err != nil {
+		t.Fatal(err)
+	}
+	declaration := filepath.Join(root, "scheduled.toml")
+	if err := os.WriteFile(declaration, []byte("[[services]]\nname = \"applied\"\ncommand = [\"go\", \"version\"]\ntimer_interval = \"5min\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.apply([]string{declaration}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.removeMany([]string{"applied"}); err != nil {
 		t.Fatal(err)
 	}
 	saved, err := b.readConfig("nightly")

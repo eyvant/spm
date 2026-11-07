@@ -1224,7 +1224,7 @@ func (b *windowsBackend) secureSystemData(name, runAs string) error {
 		rootArgs := []string{directory, "/inheritance:r", "/grant:r"}
 		rootArgs = append(rootArgs, rootGrants...)
 		rootArgs = append(rootArgs, "/Q")
-		rootCommand := exec.Command("icacls.exe", rootArgs...)
+		rootCommand := windowsExecCommand("icacls.exe", rootArgs...)
 		rootCommand.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		if output, err := rootCommand.CombinedOutput(); err != nil {
 			return fmt.Errorf("secure system service container %s: %s: %w", directory, strings.TrimSpace(string(output)), err)
@@ -1243,7 +1243,7 @@ func (b *windowsBackend) secureSystemData(name, runAs string) error {
 	args := []string{b.serviceDir(name), "/inheritance:r", "/grant:r"}
 	args = append(args, grants...)
 	args = append(args, "/Q")
-	cmd := exec.Command("icacls.exe", args...)
+	cmd := windowsExecCommand("icacls.exe", args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("secure system service data for %s: %s: %w", runAs, strings.TrimSpace(string(output)), err)
@@ -1256,7 +1256,7 @@ func (b *windowsBackend) secureSystemData(name, runAs string) error {
 		return err
 	}
 	for _, entry := range entries {
-		resetCommand := exec.Command("icacls.exe", filepath.Join(b.serviceDir(name), entry.Name()), "/reset", "/T", "/Q")
+		resetCommand := windowsExecCommand("icacls.exe", filepath.Join(b.serviceDir(name), entry.Name()), "/reset", "/T", "/Q")
 		resetCommand.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		if output, err := resetCommand.CombinedOutput(); err != nil {
 			return fmt.Errorf("inherit system service file ACLs: %s: %w", strings.TrimSpace(string(output)), err)
