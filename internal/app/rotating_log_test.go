@@ -131,3 +131,50 @@ func TestReadRotatingLogUpdatesFollowsReplacementFile(t *testing.T) {
 		t.Fatalf("current = %#v, offset = %d", current, offset)
 	}
 }
+
+func TestRotatingLogValidationAndEdgePaths(t *testing.T) {
+	path := filepath.Join(localTempDir(t), "edge.log")
+	for _, limits := range [][2]int64{{0, 1}, {1, -1}} {
+		if _, err := openRotatingLog(path, limits[0], int(limits[1])); err == nil {
+			t.Errorf("openRotatingLog limits %v unexpectedly succeeded", limits)
+		}
+	}
+	if err := os.WriteFile(path, []byte("discard"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rotateLogFiles(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("zero-backup rotation left file: %v", err)
+	}
+
+	var output bytes.Buffer
+	previous, offset, err := readRotatingLogUpdates(&output, path, nil, 7, "")
+	if err != nil || previous != nil || offset != 7 {
+		t.Fatalf("missing update = %#v, %d, %v", previous, offset, err)
+	}
+	if err := os.WriteFile(path, []byte("one\ntwo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	current, next, err := readRotatingLogUpdates(&output, path, info, info.Size()+10, "two")
+	if err != nil || current == nil || next != info.Size() || output.String() != "two\n" {
+		t.Fatalf("truncated update = %#v, %d, %q, %v", current, next, output.String(), err)
+	}
+	directory := localTempDir(t)
+	if err := printRotatedLogTail(&output, directory, 1, ""); err == nil {
+		t.Fatal("tailing a directory unexpectedly succeeded")
+	}
+	if _, err := printLogFromOffset(&output, directory, 0, ""); err == nil {
+		t.Fatal("reading a directory unexpectedly succeeded")
+	}
+	log := &rotatingLog{}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

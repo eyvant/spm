@@ -547,6 +547,37 @@ func TestWindowsSupervisorAndWaitFailurePaths(t *testing.T) {
 	if err := b.supervise("missing"); err == nil || !strings.Contains(err.Error(), "supervisor config") {
 		t.Fatalf("missing supervisor error = %v", err)
 	}
+	for _, test := range []struct {
+		name    string
+		command []string
+		status  string
+	}{
+		{"cannot-start", []string{filepath.Join(root, "missing-command.exe")}, "failed"},
+		{"exits-failed", []string{"cmd.exe", "/d", "/c", "exit", "7"}, "failed"},
+	} {
+		config := windowsServiceConfig{Version: windowsStateVersion, Name: test.name, Cwd: root, Command: test.command, Restart: "no", RestartSec: "invalid"}
+		if err := b.writeConfig(config); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.supervise(test.name); err != nil {
+			t.Fatal(err)
+		}
+		if state := b.readState(test.name); state.Status != test.status || state.Error == "" {
+			t.Errorf("failed supervisor state = %#v", state)
+		}
+	}
+	if err := os.WriteFile(b.controlPath("once"), []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.takeControl("once"); ok {
+		t.Fatal("invalid control unexpectedly accepted")
+	}
+	if err := b.writeControl("once", "restart"); err != nil {
+		t.Fatal(err)
+	}
+	if control, ok := b.takeControl("once"); !ok || control.Action != "restart" {
+		t.Fatalf("control = %#v, %t", control, ok)
+	}
 }
 
 func TestWindowsManagedServiceAndLogPaths(t *testing.T) {

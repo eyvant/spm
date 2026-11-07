@@ -262,7 +262,9 @@ func TestDarwinDeclarationPlans(t *testing.T) {
 
 func TestDarwinNativeLifecycleWithCommandBoundary(t *testing.T) {
 	original := darwinExecCommand
-	darwinExecCommand = func(string, ...string) *exec.Cmd { return exec.Command("/usr/bin/true") }
+	darwinExecCommand = func(string, ...string) *exec.Cmd {
+		return exec.Command("/bin/sh", "-c", "printf 'state = running\\npid = 123\\nruns = 1\\n'")
+	}
 	t.Cleanup(func() { darwinExecCommand = original })
 	root := t.TempDir()
 	var output bytes.Buffer
