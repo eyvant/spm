@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -750,4 +751,37 @@ func TestApplyScheduledDeclarationsAndWaitTimeout(t *testing.T) {
 	a.stderr = &warnings
 	a.warnSandboxSupport(startOptions{sandbox: "basic"})
 	a.warnSandboxSupport(startOptions{})
+}
+
+// TestWriteFileAtomicSurvivesConcurrentReaders reproduces a Windows CI flake:
+// a CLI polling a state file made the supervisor's atomic rename fail with
+// "Access is denied", so the "running" state was never recorded.
+func TestWriteFileAtomicSurvivesConcurrentReaders(t *testing.T) {
+	path := filepath.Join(localTempDir(t), "state.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _ = os.ReadFile(path)
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-done
+	}()
+	for i := 0; i < 40; i++ {
+		want := fmt.Sprintf(`{"write":%d}`, i)
+		if err := writeFileAtomic(path, []byte(want), 0o600); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
 }
