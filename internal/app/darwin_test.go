@@ -170,6 +170,16 @@ func TestDarwinLocalManagementAndReporting(t *testing.T) {
 	if got := output.String(); !strings.Contains(got, "match this") || strings.Contains(got, "last") {
 		t.Fatalf("filtered logs: %q", got)
 	}
+	for _, args := range [][]string{{"list", "--json"}, {"status", "api"}, {"logs", "--lines", "1", "api"}, {"doctor"}, {"help"}, {"help", "start"}} {
+		if err := b.run(args); err != nil {
+			t.Errorf("run(%v): %v", args, err)
+		}
+	}
+	for _, args := range [][]string{{"status"}, {"native"}, {"unknown"}} {
+		if err := b.run(args); err == nil {
+			t.Errorf("run(%v) unexpectedly succeeded", args)
+		}
+	}
 	for _, selectors := range [][]string{nil, {"all", "api"}, {"missing"}, {"bad/name"}} {
 		if _, err := b.selectNames(selectors); err == nil {
 			t.Errorf("selectNames(%v) unexpectedly succeeded", selectors)
@@ -209,5 +219,42 @@ func TestDarwinEnvironmentAndRejectedOptions(t *testing.T) {
 	}
 	if err := rejectDarwinStartOptions(startOptions{}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDarwinDeclarationPlans(t *testing.T) {
+	root := t.TempDir()
+	var output bytes.Buffer
+	b := &darwinBackend{root: root, plistDir: filepath.Join(root, "plists"), uid: os.Getuid(), stdout: &output, stderr: io.Discard}
+	services := []serviceDeclaration{{Name: "api", Command: []string{"/usr/bin/true"}}}
+	if err := b.printDeclarationPlan(services, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "create\tapi") {
+		t.Fatalf("create plan: %s", output.String())
+	}
+	desired, err := b.prepareDeclaration(services[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.writeConfig(desired); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := b.printDeclarationPlan(services, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "unchanged\tapi") {
+		t.Fatalf("unchanged plan: %s", output.String())
+	}
+	services[0].Description = "changed"
+	output.Reset()
+	if err := b.printDeclarationPlan(services, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"update\tapi", "-  config =", "+  config ="} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("detailed update plan missing %q: %s", want, output.String())
+		}
 	}
 }

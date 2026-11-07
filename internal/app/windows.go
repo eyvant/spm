@@ -1023,7 +1023,7 @@ func (b *windowsBackend) writeControl(name, action string) error {
 func (b *windowsBackend) stop(name string) error {
 	if config, err := b.readConfig(name); err == nil && config.Mode == "schedule" {
 		for _, kind := range []string{"timer", "boot"} {
-			command := exec.Command("schtasks.exe", "/End", "/TN", b.scheduleTaskName(name, kind))
+			command := windowsExecCommand("schtasks.exe", "/End", "/TN", b.scheduleTaskName(name, kind))
 			command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 			_ = command.Run()
 		}
@@ -1164,7 +1164,7 @@ func (b *windowsBackend) registerUserStartup(name, executable string) error {
 		return fmt.Errorf("create Windows Startup directory: %w", err)
 	}
 	arguments := "__windows-launch --root " + windowsQuoteCommand(b.root) + " " + windowsQuoteCommand(name)
-	cmd := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", windowsCreateShortcutScript)
+	cmd := windowsExecCommand("powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", windowsCreateShortcutScript)
 	cmd.Env = append(os.Environ(), "SPM_SHORTCUT_PATH="+b.startupPath(name), "SPM_SHORTCUT_TARGET="+executable, "SPM_SHORTCUT_ARGS="+arguments, "SPM_SHORTCUT_DESCRIPTION=Start an spm user service at logon")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if output, err := cmd.CombinedOutput(); err != nil {

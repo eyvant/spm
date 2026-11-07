@@ -753,10 +753,11 @@ func TestWindowsScheduledCommandBoundaries(t *testing.T) {
 	original := windowsExecCommand
 	t.Cleanup(func() { windowsExecCommand = original })
 	var calls []string
-	windowsExecCommand = func(name string, args ...string) *exec.Cmd {
+	successCommand := func(name string, args ...string) *exec.Cmd {
 		calls = append(calls, name+" "+strings.Join(args, " "))
 		return exec.Command("cmd.exe", "/d", "/c", "exit 0")
 	}
+	windowsExecCommand = successCommand
 
 	root, err := filepath.Abs(localTempDir(t))
 	if err != nil {
@@ -786,6 +787,20 @@ func TestWindowsScheduledCommandBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("APPDATA", filepath.Join(root, "appdata"))
+	if _, err := b.promptWindowsServicePassword(`DOMAIN\svc`); err == nil {
+		t.Fatal("empty service password unexpectedly accepted")
+	}
+	windowsExecCommand = func(name string, args ...string) *exec.Cmd {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return exec.Command("cmd.exe", "/d", "/c", "echo secret")
+	}
+	if password, err := b.promptWindowsServicePassword(`DOMAIN\svc`); err != nil || strings.TrimSpace(password) != "secret" {
+		t.Fatalf("service password = %q, %v", password, err)
+	}
+	windowsExecCommand = successCommand
+	if err := b.registerUserStartup("job", os.Args[0]); err != nil {
+		t.Fatal(err)
+	}
 	if err := b.schedule([]string{"--name", "nightly", "--interval", "1min", "--on-boot", "1min", "--run-now", "--", "go", "version"}); err != nil {
 		t.Fatal(err)
 	}
@@ -796,8 +811,16 @@ func TestWindowsScheduledCommandBoundaries(t *testing.T) {
 	if err := b.setScheduledEnabled(saved, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.unregisterScheduledTask("nightly"); err != nil {
+	for _, action := range []string{"stop", "restart", "enable", "disable"} {
+		if err := b.controlMany(action, []string{"nightly"}); err != nil {
+			t.Fatalf("%s scheduled task: %v", action, err)
+		}
+	}
+	if err := b.removeMany([]string{"nightly"}); err != nil {
 		t.Fatal(err)
+	}
+	if b.exists("nightly") {
+		t.Fatal("scheduled task survived removal")
 	}
 	joined := strings.Join(calls, "\n")
 	for _, want := range []string{"schtasks.exe /Create", "schtasks.exe /Run", "schtasks.exe /Delete", "sc.exe queryex", "sc.exe qc"} {
@@ -817,5 +840,16 @@ func TestWindowsScheduledCommandBoundaries(t *testing.T) {
 	}
 	if err := b.inspectSCMService("job", io.Discard, io.Discard); err == nil {
 		t.Fatal("failed SCM inspection unexpectedly succeeded")
+	}
+	call := 0
+	windowsExecCommand = func(string, ...string) *exec.Cmd {
+		call++
+		if call == 1 {
+			return exec.Command("cmd.exe", "/d", "/c", "exit 0")
+		}
+		return exec.Command("cmd.exe", "/d", "/c", "echo delete failed & exit /b 1")
+	}
+	if err := b.removeLegacySystemTask("job"); err == nil {
+		t.Fatal("failed legacy task deletion unexpectedly succeeded")
 	}
 }
