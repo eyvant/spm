@@ -2359,6 +2359,17 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 		if runtime.GOOS != "windows" {
 			return err
 		}
+		// On Windows, replacing a file fails with "Access is denied" while
+		// another process has it open, for example a CLI polling a service
+		// state file. Such readers hold the file only briefly, so retry
+		// before falling back to remove-and-rename.
+		for attempt := 0; attempt < atomicRenameRetries && err != nil; attempt++ {
+			time.Sleep(atomicRenameRetryDelay)
+			err = os.Rename(temporaryName, path)
+		}
+		if err == nil {
+			return nil
+		}
 		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
 			return err
 		}
@@ -2366,3 +2377,8 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	}
 	return nil
 }
+
+const (
+	atomicRenameRetries    = 100
+	atomicRenameRetryDelay = 10 * time.Millisecond
+)
