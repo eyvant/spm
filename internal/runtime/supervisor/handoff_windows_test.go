@@ -85,8 +85,8 @@ func TestSupervisorHandoffKeepsProcessRunning(t *testing.T) {
 	pid := l.ReadState(name).PID
 	started := l.ReadState(name).StartedAt
 
-	// The CLI's part: hold the job, then ask the supervisor to detach.
-	job, err := OpenJob(l, name)
+	// The CLI's part: hold the job (query access only), then ask the supervisor to detach.
+	job, err := HoldJob(l, name)
 	if err != nil {
 		t.Fatalf("open job of a version 2 supervisor: %v", err)
 	}

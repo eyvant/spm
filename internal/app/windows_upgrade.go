@@ -199,7 +199,7 @@ func (b *windowsBackend) handOver(name string, state windowsServiceState, waitOl
 	if state.PID <= 0 {
 		return "", fmt.Errorf("%w: no running process recorded", errHandoverUnavailable)
 	}
-	job, err := supervisor.OpenJob(b.layout(), name)
+	job, err := supervisor.HoldJob(b.layout(), name)
 	if err != nil {
 		// Version 1 supervisors used an unnamed job.
 		return "", fmt.Errorf("%w: %v", errHandoverUnavailable, err)

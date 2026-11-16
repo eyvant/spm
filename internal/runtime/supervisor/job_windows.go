@@ -32,6 +32,7 @@ var (
 
 const (
 	jobAllAccess  = 0x1F001F // JOB_OBJECT_ALL_ACCESS
+	jobQuery      = 0x0004   // JOB_OBJECT_QUERY
 	processAccess = windows.SYNCHRONIZE | windows.PROCESS_QUERY_LIMITED_INFORMATION | windows.PROCESS_TERMINATE | windows.PROCESS_SET_QUOTA
 	// System services run as SYSTEM or a service account; an elevated CLI
 	// must still be able to open their job for a handoff.
@@ -48,14 +49,24 @@ func (l Layout) JobName(name string) string {
 	return namespace + "spm-job-" + hex.EncodeToString(sum[:8]) + "-" + name
 }
 
-// OpenJob opens the job of a running service. It fails for services started
-// by supervisor version 1, whose jobs had no name.
-func OpenJob(l Layout, name string) (windows.Handle, error) {
+// HoldJob opens the job of a running service only to keep it alive: any open
+// handle keeps a kill-on-close job, and its processes, from being closed. It
+// asks for query access alone because a system service's job is created at
+// System integrity, and an elevated (High integrity) CLI is denied any
+// write-type access to it. It fails for services started by supervisor
+// version 1, whose jobs had no name.
+func HoldJob(l Layout, name string) (windows.Handle, error) {
+	return openJob(l, name, jobQuery)
+}
+
+// openJob opens the job of a running service with full access, as its
+// supervisor needs.
+func openJob(l Layout, name string, access uintptr) (windows.Handle, error) {
 	jobName, err := windows.UTF16PtrFromString(l.JobName(name))
 	if err != nil {
 		return 0, err
 	}
-	handle, _, callErr := procOpenJobObject.Call(jobAllAccess, 0, uintptr(unsafe.Pointer(jobName)))
+	handle, _, callErr := procOpenJobObject.Call(access, 0, uintptr(unsafe.Pointer(jobName)))
 	if handle == 0 {
 		return 0, fmt.Errorf("open job %s: %w", l.JobName(name), callErr)
 	}
@@ -156,7 +167,7 @@ func adopt(l Layout, name string, pid int) (*child, error) {
 	if pid <= 0 {
 		return nil, errors.New("no process recorded")
 	}
-	job, err := OpenJob(l, name)
+	job, err := openJob(l, name, jobAllAccess)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +196,7 @@ func adopt(l Layout, name string, pid int) (*child, error) {
 // terminateLeftoverJob ends whatever still runs in this service's job when
 // nothing could be adopted, so a fresh start never runs next to an orphan.
 func terminateLeftoverJob(l Layout, name string) bool {
-	job, err := OpenJob(l, name)
+	job, err := openJob(l, name, jobAllAccess)
 	if err != nil {
 		return false
 	}
@@ -223,7 +234,7 @@ var errNotRunning = errors.New("service is not running")
 
 // Detach asks the running supervisor of a service to exit and leave its
 // process running, for a supervisor upgrade. The caller must hold the job
-// (OpenJob) until the next supervisor has adopted the process; otherwise
+// (HoldJob) until the next supervisor has adopted the process; otherwise
 // the process is terminated when the old supervisor exits.
 func Detach(l Layout, name string) error {
 	state := l.ReadState(name)
