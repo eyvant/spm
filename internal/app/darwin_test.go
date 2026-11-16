@@ -300,3 +300,35 @@ func TestDarwinNativeLifecycleWithCommandBoundary(t *testing.T) {
 		t.Fatal("services survived removal")
 	}
 }
+
+func TestDarwinUpgradeRuntimeRestartsSchedulerDaemon(t *testing.T) {
+	original := darwinExecCommand
+	var calls []string
+	darwinExecCommand = func(name string, args ...string) *exec.Cmd {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return exec.Command("/usr/bin/true")
+	}
+	t.Cleanup(func() { darwinExecCommand = original })
+	root := t.TempDir()
+	var output bytes.Buffer
+	b := &darwinBackend{root: root, plistDir: filepath.Join(root, "plists"), uid: os.Getuid(), stdout: &output, stderr: io.Discard}
+
+	// Without scheduled jobs there is no daemon to restart.
+	if err := b.upgradeRuntime(); err != nil || len(calls) != 0 || output.Len() != 0 {
+		t.Fatalf("empty upgrade = %v, calls %q, output %q", err, calls, output.String())
+	}
+	if err := b.schedule([]string{"--name", "job", "--interval", "5min", "--", "go", "version"}); err != nil {
+		t.Fatal(err)
+	}
+	calls, output = nil, bytes.Buffer{}
+	if err := b.upgradeRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(calls, "\n")
+	if !strings.Contains(joined, "bootout "+b.domain()+"/"+b.scheduleDaemonLabel()) || !strings.Contains(joined, "bootstrap "+b.domain()+" "+b.scheduleDaemonPlistPath()) {
+		t.Fatalf("scheduler daemon was not restarted: %s", joined)
+	}
+	if !strings.Contains(output.String(), "spm scheduler restarted") {
+		t.Fatalf("missing restart report: %q", output.String())
+	}
+}

@@ -202,6 +202,9 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	if args[0] == "__scheduled-run" {
 		return runPortableSchedule(args[1:], stdout, stderr)
 	}
+	if args[0] == "__upgrade-runtime" {
+		return runUpgradeRuntime(args[1:], stdout, stderr, system)
+	}
 	if hasCommandHelp(args[1:]) {
 		return printCommandHelp(stdout, args[0])
 	}

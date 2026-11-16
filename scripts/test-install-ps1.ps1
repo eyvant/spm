@@ -77,6 +77,44 @@ try {
     $installedUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
     Assert-True (@($installedUserPath -split ';') -contains $installDir) "Installer did not add the user PATH entry"
 
+    # Upgrade while spm processes run from the installed binary: the swap must
+    # succeed and every process must move onto the new binary.
+    & $installedExecutable start --name upgrade-probe -- powershell.exe -NoProfile -Command "Start-Sleep 600"
+    Assert-True ($LASTEXITCODE -eq 0) "Could not start the upgrade probe service"
+    & $installedExecutable schedule --name upgrade-cron --cron "0 4 * * *" -- cmd.exe /c exit 0
+    Assert-True ($LASTEXITCODE -eq 0) "Could not schedule the upgrade probe job"
+    $probeState = Join-Path $dataRoot "services\upgrade-probe\state.json"
+    $daemonPidFile = Join-Path $dataRoot "scheduler-state\run.lock\pid"
+    $deadline = (Get-Date).AddSeconds(15)
+    while (-not (Test-Path -LiteralPath $daemonPidFile) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+    $oldSupervisor = (Get-Content -Raw -LiteralPath $probeState | ConvertFrom-Json).supervisor_pid
+    $oldDaemon = [int](Get-Content -LiteralPath $daemonPidFile)
+    Assert-True ($null -ne (Get-Process -Id $oldSupervisor -ErrorAction SilentlyContinue)) "Upgrade probe supervisor is not running"
+    Assert-True ($null -ne (Get-Process -Id $oldDaemon -ErrorAction SilentlyContinue)) "Scheduler daemon is not running"
+    try {
+        & $installer -InstallDir $installDir -NoCompletion -NoPath
+
+        $newSupervisor = (Get-Content -Raw -LiteralPath $probeState | ConvertFrom-Json).supervisor_pid
+        # The new daemon replaces the stale lock left by the terminated one.
+        $newDaemon = $oldDaemon
+        $deadline = (Get-Date).AddSeconds(15)
+        while ($newDaemon -eq $oldDaemon -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 200
+            try { $newDaemon = [int](Get-Content -LiteralPath $daemonPidFile -ErrorAction Stop) } catch { }
+        }
+        Assert-True ($null -eq (Get-Process -Id $oldSupervisor -ErrorAction SilentlyContinue)) "Upgrade left the old supervisor running"
+        Assert-True ($null -eq (Get-Process -Id $oldDaemon -ErrorAction SilentlyContinue)) "Upgrade left the old scheduler daemon running"
+        Assert-True ($newSupervisor -ne $oldSupervisor -and $null -ne (Get-Process -Id $newSupervisor -ErrorAction SilentlyContinue)) "Upgrade did not restart the service supervisor"
+        Assert-True ($newDaemon -ne $oldDaemon -and $null -ne (Get-Process -Id $newDaemon -ErrorAction SilentlyContinue)) "Upgrade did not restart the scheduler daemon"
+        foreach ($processId in @($newSupervisor, $newDaemon)) {
+            $image = (Get-Process -Id $processId).Path
+            Assert-True ($image -ieq $installedExecutable) "Process $processId runs $image instead of the installed binary"
+        }
+        Assert-True (-not (Get-ChildItem -LiteralPath $installDir -Filter "spm.exe.old*")) "Upgrade left the previous binary behind"
+    } finally {
+        & $installedExecutable delete all --yes | Out-Null
+    }
+
     & $installer -Version "9.8.7" -InstallDir $noExtrasInstallDir -NoCompletion -NoPath
     Assert-True (Test-Path -LiteralPath (Join-Path $noExtrasInstallDir "spm.exe")) "Installer did not normalize an explicit version"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $noExtrasInstallDir "spm-completion.ps1"))) "-NoCompletion installed completion"

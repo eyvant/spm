@@ -4,6 +4,7 @@ param(
     [string]$InstallDir = "$env:LOCALAPPDATA\Programs\spm",
     [switch]$NoCompletion,
     [switch]$NoPath,
+    [switch]$NoRestart,
     [switch]$Uninstall,
     [switch]$Force
 )
@@ -13,6 +14,66 @@ $repository = "eyvant/spm"
 
 if ($Force -and -not $Uninstall) {
     throw "-Force is only valid with -Uninstall"
+}
+
+# A running spm.exe cannot be overwritten, but it can be renamed. Earlier
+# upgrades leave the previous binary as spm.exe.old*; delete the ones that no
+# process uses any more.
+function Remove-StaleExecutables([string]$Directory) {
+    if (-not (Test-Path -LiteralPath $Directory)) { return }
+    Get-ChildItem -Force -LiteralPath $Directory -Filter "spm.exe.old*" | ForEach-Object {
+        try { Remove-Item -Force -LiteralPath $_.FullName -ErrorAction Stop } catch { }
+    }
+}
+
+function Test-SystemServices {
+    if ($env:SPM_WINDOWS_DATA_DIR) { return $false }
+    $directory = Join-Path $env:ProgramData "spm\services"
+    try {
+        return [bool]((Test-Path -LiteralPath $directory) -and
+            (Get-ChildItem -Force -LiteralPath $directory -ErrorAction Stop | Select-Object -First 1))
+    } catch {
+        # Unreadable without elevation: system data exists, so let the
+        # elevated step decide.
+        return $true
+    }
+}
+
+# Restart every spm process so it runs the binary that was just installed.
+function Update-SpmRuntime([string]$Executable) {
+    Write-Host "Restarting spm processes on the new version..."
+    & $Executable __upgrade-runtime
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Some user services could not be restarted. Check 'spm list' and restart them with 'spm restart <name>'."
+    }
+
+    if (-not (Test-SystemServices)) { return }
+    $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        & $Executable --system __upgrade-runtime
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Some system services could not be upgraded. Check 'spm --system list'."
+        }
+        return
+    }
+    Write-Host "System services need Administrator rights to upgrade; approve the Windows prompt to continue."
+    $report = Join-Path ([IO.Path]::GetTempPath()) ("spm-upgrade-" + [guid]::NewGuid() + ".log")
+    New-Item -ItemType File -Path $report | Out-Null
+    try {
+        try {
+            $process = Start-Process -FilePath $Executable -ArgumentList @("--system", "__upgrade-runtime", "--report", "`"$report`"") `
+                -Verb RunAs -WindowStyle Hidden -Wait -PassThru
+        } catch {
+            Write-Warning "System services still run the previous spm version because elevation was declined. Run this installer again and approve the prompt."
+            return
+        }
+        Get-Content -LiteralPath $report | ForEach-Object { Write-Host $_ }
+        if ($process.ExitCode -ne 0) {
+            Write-Warning "Some system services could not be upgraded. Check 'spm --system list' in an Administrator terminal."
+        }
+    } finally {
+        Remove-Item -Force -LiteralPath $report -ErrorAction SilentlyContinue
+    }
 }
 
 if ($Uninstall) {
@@ -64,6 +125,7 @@ if ($Uninstall) {
             Write-Host "Removed $path"
         }
     }
+    Remove-StaleExecutables $InstallDir
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $normalizedInstallDir = $InstallDir.TrimEnd('\', '/')
@@ -121,7 +183,24 @@ try {
     $executable = Join-Path $expanded "spm.exe"
     if (-not (Test-Path -LiteralPath $executable)) { throw "Release archive does not contain spm.exe" }
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    Copy-Item -Force -LiteralPath $executable -Destination (Join-Path $InstallDir "spm.exe")
+    Remove-StaleExecutables $InstallDir
+    $target = Join-Path $InstallDir "spm.exe"
+    $previous = $null
+    if (Test-Path -LiteralPath $target) {
+        # Move the current binary aside instead of overwriting it, so the
+        # upgrade works while spm processes are running from it.
+        $previous = Join-Path $InstallDir "spm.exe.old"
+        if (Test-Path -LiteralPath $previous) {
+            $previous = Join-Path $InstallDir ("spm.exe.old-" + [guid]::NewGuid().ToString("N"))
+        }
+        Move-Item -LiteralPath $target -Destination $previous
+    }
+    try {
+        Copy-Item -LiteralPath $executable -Destination $target
+    } catch {
+        if ($previous) { Move-Item -Force -LiteralPath $previous -Destination $target }
+        throw
+    }
 
     if (-not $NoCompletion) {
         $completion = Join-Path $InstallDir "spm-completion.ps1"
@@ -144,6 +223,14 @@ try {
     }
     Write-Host "Installed spm $Version to $InstallDir\spm.exe"
     & (Join-Path $InstallDir "spm.exe") version
+    if ($previous) {
+        if ($NoRestart) {
+            Write-Host "Skipped restarting spm processes (-NoRestart); they keep the previous version until restarted."
+        } else {
+            Update-SpmRuntime $target
+        }
+        Remove-StaleExecutables $InstallDir
+    }
 } finally {
     if (Test-Path -LiteralPath $temporaryDir) {
         Remove-Item -Recurse -Force -LiteralPath $temporaryDir

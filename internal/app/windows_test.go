@@ -3,8 +3,6 @@
 package app
 
 import (
-	"golang.org/x/sys/windows"
-
 	"bytes"
 	"errors"
 	"io"
@@ -15,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestWindowsListIncludesSchedule(t *testing.T) {

@@ -212,6 +212,8 @@ func (b *darwinBackend) run(args []string) error {
 		return b.inspectDeclaration(args[0], args[1:])
 	case "native":
 		return b.native(args[1:])
+	case "__upgrade-runtime":
+		return b.upgradeRuntime()
 	case "doctor":
 		if len(args) != 1 {
 			return errors.New("doctor does not accept arguments")

@@ -301,6 +301,25 @@ func (b *darwinBackend) refreshScheduleDaemon() error {
 	return nil
 }
 
+// upgradeRuntime restarts the scheduler daemon, the only long-running process
+// on macOS that executes spm itself; launchd runs service commands directly.
+// refreshScheduleDaemon boots the old daemon out and bootstraps a plist that
+// points at the executable running now.
+func (b *darwinBackend) upgradeRuntime() error {
+	tasks, err := discoverPortableSchedulerTasks(b.root)
+	if err != nil {
+		return err
+	}
+	if len(tasks) == 0 {
+		return nil
+	}
+	if err := b.refreshScheduleDaemon(); err != nil {
+		return fmt.Errorf("restart spm scheduler: %w", err)
+	}
+	fmt.Fprintln(b.stdout, "spm scheduler restarted")
+	return nil
+}
+
 func (b *darwinBackend) loadedScheduleTarget(target string) bool {
 	_, err := b.launchctl("print", target)
 	return err == nil

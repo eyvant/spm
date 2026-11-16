@@ -58,6 +58,7 @@ cat > "${fixture_dir}/payload/spm" <<'EOF'
 case "${1:-}" in
   version) printf 'spm test-version\n' ;;
   completion) printf '# test completion for %s\n' "${2:-unknown}" ;;
+  __upgrade-runtime) printf 'upgrade-runtime\n' >> "$SPM_TEST_UPGRADE_MARKER" ;;
   *) exit 2 ;;
 esac
 EOF
@@ -110,7 +111,21 @@ sh "$installer" --completion bash
 [ "$("${install_dir}/spm" version)" = "spm test-version" ] || fail "installed executable did not run"
 grep -q "test completion for bash" "${data_home}/bash-completion/completions/spm.bash" || fail "bash completion was not installed"
 
+upgrade_marker="${temporary_dir}/upgrade-runtime-calls"
+export SPM_TEST_UPGRADE_MARKER=$upgrade_marker
+[ ! -e "$upgrade_marker" ] || fail "a fresh install restarted spm processes"
+
 sh "$installer" --version 9.8.7 --completion zsh
+# Upgrading over an existing binary restarts the macOS scheduler; Linux has no
+# long-running spm process to restart.
+if [ "$platform" = macos ]; then
+  grep -qx "upgrade-runtime" "$upgrade_marker" || fail "upgrade did not restart the spm scheduler"
+else
+  [ ! -e "$upgrade_marker" ] || fail "Linux upgrade unexpectedly ran __upgrade-runtime"
+fi
+rm -f "$upgrade_marker"
+sh "$installer" --version 9.8.7 --completion zsh --no-restart
+[ ! -e "$upgrade_marker" ] || fail "--no-restart still restarted spm processes"
 grep -q "test completion for zsh" "${test_home}/.zfunc/_spm" || fail "zsh completion was not installed"
 
 sh "$installer" --version "$release_version" --completion fish

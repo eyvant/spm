@@ -394,6 +394,7 @@ func (b *windowsBackend) refreshScheduleDaemon() error {
 	name := b.scheduleDaemonTaskName()
 	if len(tasks) == 0 {
 		_ = b.endScheduledTask(name)
+		_ = b.stopScheduleDaemonProcess()
 		_ = b.deleteScheduledTask(name)
 		_ = os.Remove(b.scheduleDaemonLauncherPath())
 		if !b.system {
@@ -414,6 +415,9 @@ func (b *windowsBackend) refreshScheduleDaemon() error {
 	}
 	xml := renderWindowsScheduleDaemonTask(b.scheduleDaemonLauncherPath(), principal, logonType, b.system)
 	_ = b.endScheduledTask(name)
+	if err := b.stopScheduleDaemonProcess(); err != nil {
+		return err
+	}
 	if err := b.createScheduledTask(name, xml); err != nil {
 		return err
 	}

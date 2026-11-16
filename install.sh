@@ -8,6 +8,7 @@ install_dir="${SPM_INSTALL_DIR:-${HOME}/.local/bin}"
 completion_shell="${SPM_COMPLETION:-auto}"
 uninstall=false
 force=false
+restart=true
 
 usage() {
   cat <<'EOF'
@@ -15,7 +16,7 @@ Install or uninstall spm.
 
 Usage:
   install.sh [--version VERSION] [--install-dir DIRECTORY]
-             [--completion auto|bash|zsh|fish|none]
+             [--completion auto|bash|zsh|fish|none] [--no-restart]
   install.sh --uninstall [--install-dir DIRECTORY] [--force]
 
 Options:
@@ -23,6 +24,8 @@ Options:
   --install-dir DIRECTORY Install to DIRECTORY instead of ~/.local/bin.
   --completion SHELL      Install completion for SHELL (default: auto).
   --no-completion         Do not install shell completion.
+  --no-restart            On macOS, do not restart the running spm scheduler
+                          onto the new version.
   --uninstall             Remove spm and all installed shell completions.
   --force                 Uninstall even when managed user services exist.
   -h, --help              Show this help.
@@ -57,6 +60,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-completion)
       completion_shell="none"
+      shift
+      ;;
+    --no-restart)
+      restart=false
       shift
       ;;
     --uninstall)
@@ -236,10 +243,38 @@ tar -xzf "${temporary_dir}/${archive}" -C "$temporary_dir"
 [ -f "${temporary_dir}/spm" ] || fail "release archive does not contain spm"
 
 mkdir -p "$install_dir"
+upgrading=false
+if [ -e "${install_dir}/spm" ]; then
+  upgrading=true
+fi
 install -m 0755 "${temporary_dir}/spm" "${install_dir}/spm"
 
 printf 'Installed spm %s to %s/spm\n' "$version" "$install_dir"
 "${install_dir}/spm" version
+
+# On macOS the scheduler daemon runs spm itself and keeps the previous binary
+# in memory until it restarts. Linux has no long-running spm process: systemd
+# runs service commands directly.
+if [ "$upgrading" = true ] && [ "$(uname -s)" = Darwin ]; then
+  if [ "$restart" != true ]; then
+    printf 'Skipped restarting the spm scheduler (--no-restart); it keeps the previous version until restarted.\n'
+  else
+    if ! "${install_dir}/spm" __upgrade-runtime; then
+      printf 'spm installer: warning: could not restart the user spm scheduler; run the installer again.\n' >&2
+    fi
+    if directory_has_entries "/Library/Application Support/spm/services"; then
+      if [ "$(id -u)" = 0 ]; then
+        "${install_dir}/spm" --system __upgrade-runtime ||
+          printf 'spm installer: warning: could not restart the system spm scheduler.\n' >&2
+      else
+        printf 'Restarting the system spm scheduler requires administrator rights.\n'
+        if ! sudo "${install_dir}/spm" --system __upgrade-runtime; then
+          printf 'spm installer: warning: the system spm scheduler still runs the previous version; run the installer again and enter your password.\n' >&2
+        fi
+      fi
+    fi
+  fi
+fi
 
 if [ "$completion_shell" = "auto" ]; then
   detected_shell=${SHELL:-}

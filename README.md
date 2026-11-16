@@ -71,6 +71,26 @@ curl -fsSL https://raw.githubusercontent.com/eyvant/spm/main/install.sh | \
   sh -s -- --version v0.1.0
 ```
 
+### Upgrading
+
+Run the installer again. It replaces the binary while spm is running and then
+moves every running spm process onto the new version, so nothing keeps
+running the old code:
+
+- **Windows:** the scheduler is restarted, and running user services are
+  restarted once (each service's supervisor runs spm itself, so swapping it
+  restarts the service). When system services exist, the installer asks for
+  Administrator approval once, refreshes each service's supervisor copy, and
+  restarts the ones that were running.
+- **macOS:** the scheduler daemon is restarted (with `sudo` for system jobs).
+  Services are run by launchd directly and are not touched.
+- **Linux:** nothing needs restarting; systemd runs service commands directly.
+
+A scheduled job that is running during the upgrade finishes normally; its
+next run uses the new version. Pass `-NoRestart` (Windows) or `--no-restart`
+(macOS) to keep processes on the previous version until you restart them
+yourself.
+
 Or install from source with Go 1.27 or later:
 
 ```bash
