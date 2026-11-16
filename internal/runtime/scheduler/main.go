@@ -15,7 +15,7 @@ import (
 //	spm-scheduler run --config FILE --state-dir DIR [--log FILE] [--activation KIND] [--force]
 func Main(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: spm-scheduler version | daemon --root ROOT [--domain DOMAIN] | run ...")
+		return errors.New("usage: spm-scheduler version | daemon --root ROOT [--domain DOMAIN] | run --config FILE --state-dir DIR")
 	}
 	switch args[0] {
 	case "version", "--version":
