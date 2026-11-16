@@ -100,6 +100,18 @@ function Wait-Log([string]$Name, [string]$Pattern, [int]$TimeoutSeconds = 30) {
     throw "$Name did not log $Pattern after $TimeoutSeconds seconds.`nSTATUS`n$status`nLOG`n$lastLog"
 }
 
+# Mirrors scheduleDaemonRootSuffix: a non-default data directory gets
+# "-" + the first four bytes of SHA-256(lowercase path) as hex.
+function Get-SchedulerRootSuffix([string]$Root) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Root.ToLowerInvariant()))
+    } finally {
+        $sha.Dispose()
+    }
+    return '-' + (($hash[0..3] | ForEach-Object { $_.ToString('x2') }) -join '')
+}
+
 function Wait-File([string]$Path, [int]$TimeoutSeconds = 90) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
@@ -243,10 +255,11 @@ $accountLine
 	if ($launcherText -notmatch '__scheduled-run' -or $launcherText -notmatch '--activation.+daemon' -or $launcherText -notmatch ', 0, True') {
 		throw "Unexpected hidden schedule launcher: $launcherText"
 	}
+    $schedulerSuffix = Get-SchedulerRootSuffix $data
     $schedulerTaskName = if ($system) {
-        'spm-system-scheduler'
+        'spm-system-scheduler' + $schedulerSuffix
     } else {
-        'spm-user-scheduler-' + [Security.Principal.WindowsIdentity]::GetCurrent().User.Value.Replace('-', '')
+        'spm-user-scheduler-' + [Security.Principal.WindowsIdentity]::GetCurrent().User.Value.Replace('-', '') + $schedulerSuffix
     }
     $schedulerTask = if ($system) {
         Get-ScheduledTask -TaskName $schedulerTaskName -ErrorAction Stop
@@ -262,7 +275,7 @@ $accountLine
         if ($schedulerXml -notmatch '<BootTrigger(?:\s*/>|>)') { throw "System scheduler is missing its boot trigger: $schedulerXml" }
     } else {
         if ($schedulerXml -match '<LogonTrigger>') { throw "User scheduler should use the Startup shortcut, not a privileged logon trigger: $schedulerXml" }
-        $schedulerShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\spm-schedule-daemon.lnk'
+        $schedulerShortcut = Join-Path $env:APPDATA ('Microsoft\Windows\Start Menu\Programs\Startup\spm-schedule-daemon' + $schedulerSuffix + '.lnk')
         if (-not (Test-Path -LiteralPath $schedulerShortcut)) { throw "User scheduler Startup shortcut is missing: $schedulerShortcut" }
     }
     try {
