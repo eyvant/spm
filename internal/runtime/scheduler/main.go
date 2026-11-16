@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+
+	"github.com/eyvant/spm/internal/runtime/common"
 )
 
 // Main is the spm-scheduler entry point:
@@ -19,7 +21,7 @@ func Main(args []string, stdout, stderr io.Writer) error {
 	}
 	switch args[0] {
 	case "version", "--version":
-		fmt.Fprintf(stdout, "spm-scheduler %d\n", Version)
+		fmt.Fprintln(stdout, common.VersionLine("spm-scheduler"))
 		return nil
 	case "run":
 		return Run(args[1:], stdout, stderr)

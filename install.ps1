@@ -21,9 +21,10 @@ if ($NoRestart -and $RestartServices) {
 }
 
 # spm.exe is the CLI. spm-supervisor.exe runs user services and is copied into
-# each system service; spm-scheduler.exe runs scheduled jobs. The runtimes
-# carry their own version and are replaced only when it changes, so upgrading
-# the CLI alone never restarts anything.
+# each system service; spm-scheduler.exe runs scheduled jobs. Release builds
+# of the runtimes are reproducible, so a runtime is replaced, and its
+# processes moved, only when the file itself changed: a release that changes
+# only the CLI restarts nothing.
 $runtimes = [ordered]@{
     "spm-supervisor.exe" = "--supervisor"
     "spm-scheduler.exe"  = "--scheduler"
@@ -57,9 +58,9 @@ function Install-Executable([string]$Source, [string]$Target) {
     }
 }
 
-function Get-RuntimeVersion([string]$Executable) {
-    if (-not (Test-Path -LiteralPath $Executable)) { return $null }
-    try { return ((& $Executable version) | Select-Object -First 1).Trim() } catch { return $null }
+function Test-SameFile([string]$Source, [string]$Target) {
+    if (-not (Test-Path -LiteralPath $Target)) { return $false }
+    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Source).Hash -eq (Get-FileHash -Algorithm SHA256 -LiteralPath $Target).Hash
 }
 
 function Test-SystemServices {
@@ -228,14 +229,14 @@ try {
     foreach ($runtime in $runtimes.Keys) {
         $source = Join-Path $expanded $runtime
         $installed = Join-Path $InstallDir $runtime
-        $newVersion = Get-RuntimeVersion $source
-        if ($newVersion -and $newVersion -eq (Get-RuntimeVersion $installed)) {
-            Write-Host "$newVersion is already installed"
+        $runtimeName = [IO.Path]::GetFileNameWithoutExtension($runtime)
+        if (Test-SameFile $source $installed) {
+            Write-Host "$runtimeName is unchanged"
             continue
         }
         Install-Executable $source $installed
         $changed += $runtimes[$runtime]
-        Write-Host "Installed $newVersion"
+        Write-Host "Installed a new $runtimeName"
     }
 
     if (-not $NoCompletion) {
@@ -260,7 +261,7 @@ try {
     Write-Host "Installed spm $Version to $InstallDir\spm.exe"
     & (Join-Path $InstallDir "spm.exe") version
     # A first install has nothing running. After an upgrade, only the
-    # runtimes whose version changed need their processes moved; that includes
+    # runtimes that changed need their processes moved; that includes
     # installs from before the split, whose services still run spm.exe.
     if ($upgrading -and $changed.Count -gt 0) {
         if ($NoRestart) {

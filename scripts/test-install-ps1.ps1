@@ -104,7 +104,7 @@ try {
     Assert-True ($null -ne (Get-Process -Id $oldSupervisor -ErrorAction SilentlyContinue)) "Upgrade probe supervisor is not running"
     Assert-True ($null -ne (Get-Process -Id $oldDaemon -ErrorAction SilentlyContinue)) "Scheduler daemon is not running"
     try {
-        # Same runtime versions: only the CLI is replaced, nothing restarts.
+        # Same runtime files: only the CLI is replaced, nothing restarts.
         & $installer -InstallDir $installDir -NoCompletion -NoPath
         Assert-True ((Get-Content -Raw -LiteralPath $probeState | ConvertFrom-Json).supervisor_pid -eq $oldSupervisor) "A CLI-only upgrade restarted the service"
         Assert-True ([int](Get-Content -LiteralPath $daemonPidFile) -eq $oldDaemon) "A CLI-only upgrade restarted the scheduler"

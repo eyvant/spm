@@ -128,16 +128,23 @@ upgrade_marker="${temporary_dir}/upgrade-runtime-calls"
 export SPM_TEST_UPGRADE_MARKER=$upgrade_marker
 [ ! -e "$upgrade_marker" ] || fail "a fresh install restarted spm processes"
 if [ "$platform" = macos ]; then
-  [ "$("${install_dir}/spm-scheduler" version)" = "spm-scheduler 1" ] || fail "spm-scheduler was not installed"
+  cmp -s "${install_dir}/spm-scheduler" "${fixture_dir}/payload/spm-scheduler" || fail "spm-scheduler was not installed"
 else
   [ ! -e "${install_dir}/spm-scheduler" ] || fail "Linux install added spm-scheduler"
 fi
 
-# Same scheduler version: upgrading the CLI restarts nothing.
+# Same scheduler file: upgrading the CLI restarts nothing.
 sh "$installer" --version 9.8.7 --completion zsh
 [ ! -e "$upgrade_marker" ] || fail "an unchanged scheduler was restarted"
 
 if [ "$platform" = macos ]; then
+  # A different scheduler file is replaced and the scheduler restarted.
+  printf '# previous build\n' >> "${install_dir}/spm-scheduler"
+  sh "$installer" --version 9.8.7 --completion zsh
+  grep -qx "__upgrade-runtime --scheduler" "$upgrade_marker" || fail "upgrade did not restart a changed spm scheduler"
+  cmp -s "${install_dir}/spm-scheduler" "${fixture_dir}/payload/spm-scheduler" || fail "upgrade did not replace a changed spm-scheduler"
+  rm -f "$upgrade_marker"
+
   # An install from before spm-scheduler existed: the scheduler counts as
   # changed, and scheduling moves onto it.
   rm -f "${install_dir}/spm-scheduler"

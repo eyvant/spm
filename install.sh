@@ -243,10 +243,11 @@ fi
 tar -xzf "${temporary_dir}/${archive}" -C "$temporary_dir"
 [ -f "${temporary_dir}/spm" ] || fail "release archive does not contain spm"
 
-# macOS also ships spm-scheduler, the runtime behind scheduled jobs. It
-# carries its own version and is replaced only when that changes, so
-# upgrading the CLI alone never restarts the scheduler. Linux needs no
-# runtime: systemd runs services and timers itself.
+# macOS also ships spm-scheduler, the runtime behind scheduled jobs. Release
+# builds of it are reproducible, so it is replaced, and the scheduler
+# restarted, only when the file itself changed: a release that changes only
+# the CLI restarts nothing. Linux needs no runtime: systemd runs services and
+# timers itself.
 is_darwin=false
 if [ "$(uname -s)" = Darwin ]; then
   is_darwin=true
@@ -265,16 +266,11 @@ printf 'Installed spm %s to %s/spm\n' "$version" "$install_dir"
 
 scheduler_changed=false
 if [ "$is_darwin" = true ]; then
-  new_scheduler=$("${temporary_dir}/spm-scheduler" version 2>/dev/null || true)
-  installed_scheduler=
-  if [ -x "${install_dir}/spm-scheduler" ]; then
-    installed_scheduler=$("${install_dir}/spm-scheduler" version 2>/dev/null || true)
-  fi
-  if [ -n "$new_scheduler" ] && [ "$new_scheduler" = "$installed_scheduler" ]; then
-    printf '%s is already installed\n' "$new_scheduler"
+  if [ -f "${install_dir}/spm-scheduler" ] && cmp -s "${temporary_dir}/spm-scheduler" "${install_dir}/spm-scheduler"; then
+    printf 'spm-scheduler is unchanged\n'
   else
     install -m 0755 "${temporary_dir}/spm-scheduler" "${install_dir}/spm-scheduler"
-    printf 'Installed %s\n' "$new_scheduler"
+    printf 'Installed a new spm-scheduler\n'
     scheduler_changed=true
   fi
 fi

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+
+	"github.com/eyvant/spm/internal/runtime/common"
 )
 
 // Main is the spm-supervisor entry point:
@@ -16,7 +18,7 @@ import (
 //	spm-supervisor service --root ROOT NAME     (system service under the SCM)
 func Main(args []string, stdout, _ io.Writer) error {
 	if len(args) == 1 && (args[0] == "version" || args[0] == "--version") {
-		fmt.Fprintf(stdout, "spm-supervisor %d\n", Version)
+		fmt.Fprintln(stdout, common.VersionLine("spm-supervisor"))
 		return nil
 	}
 	if len(args) != 4 || args[1] != "--root" || !filepath.IsAbs(args[2]) {

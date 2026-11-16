@@ -76,15 +76,19 @@ curl -fsSL https://raw.githubusercontent.com/eyvant/spm/main/install.sh | \
 Run the installer again; it works while services are running.
 
 `spm` itself is only the command-line tool. Background work is done by two
-small runtimes installed next to it, each with its own version:
+small runtimes installed next to it:
 
 | Runtime | Platforms | Runs |
 | --- | --- | --- |
 | `spm-supervisor` | Windows | every service (systemd and launchd supervise services elsewhere) |
 | `spm-scheduler` | Windows, macOS | the scheduler daemon and every scheduled-job run |
 
-The installer replaces a runtime only when its version changes, so most
-upgrades replace just the CLI and restart nothing. When a runtime does change:
+Release builds of the runtimes are reproducible, and the installer replaces a
+runtime only when its file differs from the installed one. Most upgrades
+therefore replace just the CLI and restart nothing; a runtime changes when its
+code, a dependency or the Go toolchain release changes. `spm-supervisor
+version` and `spm-scheduler version` print the start of the file's SHA-256.
+When a runtime does change:
 
 - **`spm-scheduler`:** the scheduler daemon is restarted. Services are not
   touched, and a job that is running finishes normally; its next run uses the

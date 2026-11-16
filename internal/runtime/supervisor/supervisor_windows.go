@@ -2,8 +2,8 @@
 
 // Package supervisor is the process supervisor behind every Windows service
 // managed by spm. It is built into spm-supervisor.exe, which stays running for
-// as long as its service runs, so this package changes rarely and is
-// versioned on its own (see Version).
+// as long as its service runs, so this package changes rarely. Installers
+// replace spm-supervisor.exe only when the file changes (see common.BuildID).
 package supervisor
 
 import (
@@ -192,7 +192,7 @@ func Supervise(l Layout, name string) error {
 	adopted, adoptErr := adopt(l, name, previous.PID)
 	if adopted != nil {
 		state.Restarts, state.StartedAt = previous.Restarts, previous.StartedAt
-		fmt.Fprintf(log, "[%s] spm: supervisor %d (version %d) took over running process %d\r\n", time.Now().Format(time.RFC3339), os.Getpid(), Version, adopted.pid)
+		fmt.Fprintf(log, "[%s] spm: supervisor %d (build %s) took over running process %d\r\n", time.Now().Format(time.RFC3339), os.Getpid(), common.BuildID(), adopted.pid)
 	} else if !errors.Is(adoptErr, errNothingToAdopt) {
 		// A live process is waiting to be taken over. Starting a second
 		// one, or terminating it, would turn a failed handoff into a restart;
