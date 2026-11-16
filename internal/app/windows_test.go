@@ -3,6 +3,8 @@
 package app
 
 import (
+	"golang.org/x/sys/windows"
+
 	"bytes"
 	"errors"
 	"io"
@@ -662,7 +664,8 @@ func TestWindowsSchedulePathAndLauncherHelpers(t *testing.T) {
 	if b.scheduleTaskName("job", "timer") != "spm-job-schedule" || b.scheduleTaskName("job", "boot") != "spm-job-schedule-boot" {
 		t.Fatal("unexpected scheduled task names")
 	}
-	if b.scheduleDaemonTaskName() == "" || !strings.HasSuffix(b.scheduleDaemonLauncherPath(), "scheduler.vbs") || !strings.HasSuffix(b.scheduleDaemonStartupPath(), "spm-schedule-daemon.lnk") {
+	suffix := b.scheduleDaemonRootSuffix()
+	if b.scheduleDaemonTaskName() == "" || !strings.HasSuffix(b.scheduleDaemonLauncherPath(), "scheduler.vbs") || !strings.HasSuffix(b.scheduleDaemonStartupPath(), "spm-schedule-daemon"+suffix+".lnk") {
 		t.Fatal("unexpected scheduler daemon paths")
 	}
 	launcher := filepath.Join(root, "hidden.vbs")
@@ -704,6 +707,39 @@ func TestWindowsSCMMissingServicePaths(t *testing.T) {
 		t.Fatal("inspecting a missing SCM service unexpectedly succeeded")
 	}
 	_ = b.checkSCM()
+}
+
+// A non-default data directory must never share the scheduler task or logon
+// shortcut of the real installation; refreshing an empty test root once deleted
+// the user's live spm-user-scheduler task.
+func TestWindowsSchedulerDaemonNamesAreScopedToRoot(t *testing.T) {
+	appData, err := windows.KnownFolderPath(windows.FOLDERID_RoamingAppData, 0)
+	if err != nil {
+		t.Skipf("resolve RoamingAppData: %v", err)
+	}
+	root := localTempDir(t)
+	t.Setenv("APPDATA", root) // an overridden APPDATA must not impersonate the default root
+	real := &windowsBackend{root: filepath.Join(appData, "spm")}
+	temp := &windowsBackend{root: filepath.Join(root, "spm")}
+	if real.scheduleDaemonRootSuffix() != "" {
+		t.Fatalf("default root suffix = %q, want empty", real.scheduleDaemonRootSuffix())
+	}
+	if !strings.HasPrefix(real.scheduleDaemonTaskName(), "spm-user-scheduler") {
+		t.Fatalf("default task name = %q", real.scheduleDaemonTaskName())
+	}
+	if temp.scheduleDaemonTaskName() == real.scheduleDaemonTaskName() {
+		t.Fatalf("temporary root reuses the default scheduler task %q", real.scheduleDaemonTaskName())
+	}
+	if !strings.HasPrefix(temp.scheduleDaemonTaskName(), real.scheduleDaemonTaskName()+"-") {
+		t.Fatalf("temporary task name = %q", temp.scheduleDaemonTaskName())
+	}
+	if temp.scheduleDaemonStartupPath() == real.scheduleDaemonStartupPath() {
+		t.Fatal("temporary root reuses the default logon shortcut")
+	}
+	upper := &windowsBackend{root: strings.ToUpper(temp.root)}
+	if upper.scheduleDaemonTaskName() != temp.scheduleDaemonTaskName() {
+		t.Fatal("scheduler task name depends on path case")
+	}
 }
 
 func TestWindowsProcessAndEmptySchedulerPaths(t *testing.T) {

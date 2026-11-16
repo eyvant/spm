@@ -3,6 +3,8 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +16,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf16"
+
+	"golang.org/x/sys/windows"
 )
 
 func (b *windowsBackend) scheduleRecordPath(name string) string {
@@ -323,13 +327,32 @@ func (b *windowsBackend) setScheduledEnabled(config windowsServiceConfig, enable
 
 func (b *windowsBackend) scheduleDaemonTaskName() string {
 	if b.system {
-		return "spm-system-scheduler"
+		return "spm-system-scheduler" + b.scheduleDaemonRootSuffix()
 	}
 	current, err := user.Current()
 	if err != nil {
-		return "spm-user-scheduler"
+		return "spm-user-scheduler" + b.scheduleDaemonRootSuffix()
 	}
-	return "spm-user-scheduler-" + strings.ReplaceAll(current.Uid, "-", "")
+	return "spm-user-scheduler-" + strings.ReplaceAll(current.Uid, "-", "") + b.scheduleDaemonRootSuffix()
+}
+
+// scheduleDaemonRootSuffix keeps the scheduler task and logon shortcut of a
+// non-default data directory (SPM_WINDOWS_DATA_DIR, tests) apart from the
+// default installation's. Without it, refreshing an empty temporary root
+// deletes the real scheduler task. The default root keeps the unsuffixed
+// names so existing installations stay valid. The default is resolved through
+// the Known Folder API so an overridden APPDATA cannot impersonate it.
+func (b *windowsBackend) scheduleDaemonRootSuffix() string {
+	folder := windows.FOLDERID_RoamingAppData
+	if b.system {
+		folder = windows.FOLDERID_ProgramData
+	}
+	base, err := windows.KnownFolderPath(folder, 0)
+	if err == nil && strings.EqualFold(filepath.Clean(b.root), filepath.Join(base, "spm")) {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(b.root))))
+	return "-" + hex.EncodeToString(sum[:4])
 }
 
 func (b *windowsBackend) scheduleDaemonLauncherPath() string {
@@ -338,7 +361,7 @@ func (b *windowsBackend) scheduleDaemonLauncherPath() string {
 
 func (b *windowsBackend) scheduleDaemonStartupPath() string {
 	directory, _ := windowsStartupDirectory()
-	return filepath.Join(directory, "spm-schedule-daemon.lnk")
+	return filepath.Join(directory, "spm-schedule-daemon"+b.scheduleDaemonRootSuffix()+".lnk")
 }
 
 func (b *windowsBackend) registerUserScheduleDaemonStartup(taskName string) error {
