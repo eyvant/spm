@@ -5,6 +5,7 @@ param(
     [switch]$NoCompletion,
     [switch]$NoPath,
     [switch]$NoRestart,
+    [switch]$RestartServices,
     [switch]$Uninstall,
     [switch]$Force
 )
@@ -14,6 +15,9 @@ $repository = "eyvant/spm"
 
 if ($Force -and -not $Uninstall) {
     throw "-Force is only valid with -Uninstall"
+}
+if ($NoRestart -and $RestartServices) {
+    throw "-NoRestart and -RestartServices cannot be combined"
 }
 
 # spm.exe is the CLI. spm-supervisor.exe runs user services and is copied into
@@ -76,7 +80,7 @@ function Update-SpmRuntime([string]$Executable, [string[]]$Components) {
     Write-Host "Moving running spm processes onto the new runtime ($($Components -join ' '))..."
     & $Executable __upgrade-runtime @Components
     if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Some user services could not be restarted. Check 'spm list' and restart them with 'spm restart <name>'."
+        Write-Warning "Some user services were not moved to the new supervisor; the messages above say why and what to do. They keep running."
     }
 
     if (-not (Test-SystemServices)) { return }
@@ -84,7 +88,7 @@ function Update-SpmRuntime([string]$Executable, [string[]]$Components) {
     if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         & $Executable --system __upgrade-runtime @Components
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Some system services could not be upgraded. Check 'spm --system list'."
+            Write-Warning "Some system services were not moved to the new supervisor; the messages above say why and what to do. They keep running."
         }
         return
     }
@@ -101,7 +105,7 @@ function Update-SpmRuntime([string]$Executable, [string[]]$Components) {
         }
         Get-Content -LiteralPath $report | ForEach-Object { Write-Host $_ }
         if ($process.ExitCode -ne 0) {
-            Write-Warning "Some system services could not be upgraded. Check 'spm --system list' in an Administrator terminal."
+            Write-Warning "Some system services were not moved to the new supervisor; the messages above say why and what to do. They keep running."
         }
     } finally {
         Remove-Item -Force -LiteralPath $report -ErrorAction SilentlyContinue
@@ -262,6 +266,10 @@ try {
         if ($NoRestart) {
             Write-Host "Skipped moving spm processes onto the new runtime (-NoRestart); they keep the previous version until restarted."
         } else {
+            # Services are handed to a new supervisor without stopping them.
+            # One that cannot be handed over is left running on its current
+            # supervisor and reported, unless -RestartServices allows a restart.
+            if ($RestartServices -and $changed -contains "--supervisor") { $changed += "--allow-restart" }
             Update-SpmRuntime $target $changed
         }
     }

@@ -9,6 +9,7 @@ package supervisor
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -192,11 +193,13 @@ func Supervise(l Layout, name string) error {
 	if adopted != nil {
 		state.Restarts, state.StartedAt = previous.Restarts, previous.StartedAt
 		fmt.Fprintf(log, "[%s] spm: supervisor %d (version %d) took over running process %d\r\n", time.Now().Format(time.RFC3339), os.Getpid(), Version, adopted.pid)
-	} else if previous.PID > 0 {
-		fmt.Fprintf(log, "[%s] spm: could not take over process %d: %v\r\n", time.Now().Format(time.RFC3339), previous.PID, adoptErr)
-		if terminateLeftoverJob(l, name) {
-			fmt.Fprintf(log, "[%s] spm: terminated the processes left in the service's job\r\n", time.Now().Format(time.RFC3339))
-		}
+	} else if !errors.Is(adoptErr, errNothingToAdopt) {
+		// A live process is waiting to be taken over. Starting a second
+		// one, or terminating it, would turn a failed handoff into a restart;
+		// leave it to whoever is holding its job, which restores the
+		// previous supervisor.
+		fmt.Fprintf(log, "[%s] spm: supervisor %d could not take over running process %d: %v\r\n", time.Now().Format(time.RFC3339), os.Getpid(), previous.PID, adoptErr)
+		return fmt.Errorf("cannot take over running process %d: %w", previous.PID, adoptErr)
 	}
 	_ = l.WriteState(state)
 	delay, err := time.ParseDuration(config.RestartSec)

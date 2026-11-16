@@ -10,8 +10,11 @@ import (
 
 // upgradeComponents selects which runtimes an upgrade moved to a new version.
 type upgradeComponents struct {
-	supervisor bool // spm-supervisor: restart supervised services
+	supervisor bool // spm-supervisor: hand running services to the new supervisor
 	scheduler  bool // spm-scheduler: rewrite job launchers, restart the daemon
+	// allowRestart restarts a service that cannot be handed over instead
+	// of leaving it on its current supervisor and reporting an error.
+	allowRestart bool
 }
 
 func (c upgradeComponents) flags() []string {
@@ -21,6 +24,9 @@ func (c upgradeComponents) flags() []string {
 	}
 	if c.scheduler {
 		flags = append(flags, "--scheduler")
+	}
+	if c.allowRestart {
+		flags = append(flags, "--allow-restart")
 	}
 	return flags
 }
@@ -33,12 +39,14 @@ func parseUpgradeComponents(args []string) (upgradeComponents, error) {
 			components.supervisor = true
 		case "--scheduler":
 			components.scheduler = true
+		case "--allow-restart":
+			components.allowRestart = true
 		default:
-			return components, fmt.Errorf("unknown upgrade component %q", arg)
+			return components, fmt.Errorf("unknown upgrade option %q", arg)
 		}
 	}
 	if !components.supervisor && !components.scheduler {
-		components = upgradeComponents{supervisor: true, scheduler: true}
+		components.supervisor, components.scheduler = true, true
 	}
 	return components, nil
 }
@@ -47,7 +55,7 @@ func parseUpgradeComponents(args []string) (upgradeComponents, error) {
 // Installers call it after replacing spm-supervisor or spm-scheduler, naming
 // the runtimes whose version changed:
 //
-//	spm [--system] __upgrade-runtime [--supervisor] [--scheduler] [--report FILE]
+//	spm [--system] __upgrade-runtime [--supervisor] [--scheduler] [--allow-restart] [--report FILE]
 //
 // With neither component named, both are refreshed. Upgrading only the spm
 // CLI needs no call at all: no background process runs the CLI.
@@ -60,7 +68,7 @@ func runUpgradeRuntime(args []string, stdout, stderr io.Writer, system bool) (er
 	for index := 0; index < len(args); index++ {
 		if args[index] == "--report" {
 			if index+1 >= len(args) || args[index+1] == "" {
-				return errors.New("usage: spm [--system] __upgrade-runtime [--supervisor] [--scheduler] [--report FILE]")
+				return errors.New("usage: spm [--system] __upgrade-runtime [--supervisor] [--scheduler] [--allow-restart] [--report FILE]")
 			}
 			report = args[index+1]
 			index++

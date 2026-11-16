@@ -93,8 +93,15 @@ upgrades replace just the CLI and restart nothing. When a runtime does change:
   supervisor without being stopped. The old supervisor detaches and leaves the
   process running; the new one adopts it, keeping its start time and restart
   count. For system services the installer asks for Administrator approval
-  once. Services started by supervisor version 1 (spm 0.3.6) cannot be handed
-  over and are restarted once instead.
+  once.
+
+  An upgrade never restarts a service on its own. A service that cannot be
+  handed over (for example one still running on the supervisor from spm 0.3.6
+  or earlier) keeps running on its current supervisor, and the installer
+  reports it with the commands that move it over when a short interruption
+  suits you: `spm stop <name>` then `spm run <name>`. If the new supervisor
+  fails to start, the previous one takes the service back. Pass
+  `-RestartServices` to restart services that cannot be handed over instead.
 
 On macOS, system jobs need `sudo`. Linux needs neither runtime. Pass
 `-NoRestart` (Windows) or `--no-restart` (macOS) to keep running processes on

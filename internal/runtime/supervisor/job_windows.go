@@ -104,7 +104,8 @@ func setKillOnClose(job windows.Handle) error {
 	return err
 }
 
-func processInJob(process, job windows.Handle) bool {
+// ProcessInJob reports whether process runs inside job.
+func ProcessInJob(process, job windows.Handle) bool {
 	var result int32
 	ok, _, _ := procIsProcessInJob.Call(uintptr(process), uintptr(job), uintptr(unsafe.Pointer(&result)))
 	return ok != 0 && result != 0
@@ -160,20 +161,33 @@ func startChild(l Layout, name string, config Config, log *os.File) (*child, err
 	return newChild(pid, process, job), jobErr, nil
 }
 
+// errNothingToAdopt means there is no detached process to take over: no
+// process was recorded, no job holds one, or it has already exited. A fresh
+// start is then the right thing to do.
+var errNothingToAdopt = errors.New("nothing to take over")
+
 // adopt takes over the process a detached supervisor left running. It
 // accepts the process only while it runs inside this service's job, so a
-// recycled PID is never adopted. The error says why nothing was adopted.
+// recycled PID is never adopted. An error other than errNothingToAdopt means
+// a live process is waiting in the job but cannot be taken over.
 func adopt(l Layout, name string, pid int) (*child, error) {
 	if pid <= 0 {
-		return nil, errors.New("no process recorded")
+		return nil, fmt.Errorf("%w: no process recorded", errNothingToAdopt)
 	}
 	job, err := openJob(l, name, jobAllAccess)
 	if err != nil {
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+			// Nobody holds the job, so its processes are gone.
+			return nil, fmt.Errorf("%w: %v", errNothingToAdopt, err)
+		}
 		return nil, err
 	}
 	process, err := windows.OpenProcess(processAccess, false, uint32(pid))
 	if err != nil {
 		_ = windows.CloseHandle(job)
+		if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+			return nil, fmt.Errorf("%w: process %d has exited", errNothingToAdopt, pid)
+		}
 		return nil, fmt.Errorf("open process %d: %w", pid, err)
 	}
 	fail := func(reason error) (*child, error) {
@@ -182,26 +196,15 @@ func adopt(l Layout, name string, pid int) (*child, error) {
 		return nil, reason
 	}
 	if event, _ := windows.WaitForSingleObject(process, 0); event == windows.WAIT_OBJECT_0 {
-		return fail(fmt.Errorf("process %d has exited", pid))
+		return fail(fmt.Errorf("%w: process %d has exited", errNothingToAdopt, pid))
 	}
-	if !processInJob(process, job) {
+	if !ProcessInJob(process, job) {
 		return fail(fmt.Errorf("process %d is not in job %s", pid, l.JobName(name)))
 	}
 	if err := setKillOnClose(job); err != nil {
 		return fail(fmt.Errorf("configure job: %w", err))
 	}
 	return newChild(pid, process, job), nil
-}
-
-// terminateLeftoverJob ends whatever still runs in this service's job when
-// nothing could be adopted, so a fresh start never runs next to an orphan.
-func terminateLeftoverJob(l Layout, name string) bool {
-	job, err := openJob(l, name, jobAllAccess)
-	if err != nil {
-		return false
-	}
-	defer windows.CloseHandle(job)
-	return windows.TerminateJobObject(job, 1) == nil
 }
 
 // kill terminates the process, and with it everything it started.

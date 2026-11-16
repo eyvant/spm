@@ -688,6 +688,12 @@ func (b *windowsBackend) startManagedStack(name string, stack map[string]bool) e
 	if err != nil {
 		return err
 	}
+	return b.spawnSupervisor(executable, name)
+}
+
+// spawnSupervisor starts a detached user-service supervisor from executable
+// and waits until the service runs.
+func (b *windowsBackend) spawnSupervisor(executable, name string) error {
 	cmd := exec.Command(executable, "supervise", "--root", b.root, name)
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x00000008 | 0x00000200, HideWindow: true}
 	null, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
@@ -711,6 +717,13 @@ func (b *windowsBackend) startSystemManaged(name string) error {
 		if err := b.removeLegacySystemTask(name); err != nil {
 			return err
 		}
+		if err := b.installSCMService(name); err != nil {
+			return err
+		}
+	} else if running, err := b.scmRunning(name); err == nil && !running {
+		// A stopped service starts on the installed spm-supervisor, so
+		// `stop` followed by `run` (or `restart`) moves it onto a new
+		// supervisor that could not take it over while running.
 		if err := b.installSCMService(name); err != nil {
 			return err
 		}

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,7 +127,7 @@ func TestWindowsUpgradeRuntimeWithNothingRunning(t *testing.T) {
 	if output.Len() != 0 {
 		t.Fatalf("stopped services were reported as restarted: %q", output.String())
 	}
-	if outcome, err := b.upgradeUserService("idle"); outcome != "" || err != nil {
+	if outcome, err := b.upgradeUserService("idle", false); outcome != "" || err != nil {
 		t.Fatalf("upgradeUserService(idle) = %q, %v", outcome, err)
 	}
 }
@@ -171,7 +172,7 @@ func TestWindowsSupervisorUpgradeHandsServiceOver(t *testing.T) {
 		t.Fatalf("service did not start: %+v", before)
 	}
 
-	outcome, err := b.upgradeUserService("probe")
+	outcome, err := b.upgradeUserService("probe", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,5 +194,73 @@ func TestWindowsSupervisorUpgradeHandsServiceOver(t *testing.T) {
 	}
 	if b.readState("probe").Status != "stopped" {
 		t.Fatalf("service did not stop after the handoff: %+v", b.readState("probe"))
+	}
+}
+
+// When the new supervisor cannot start, the upgrade fails without restarting
+// the service: the previous supervisor takes the same process back.
+func TestWindowsSupervisorHandoffRollsBackWhenNewSupervisorFails(t *testing.T) {
+	ping, err := exec.LookPath("ping.exe")
+	if err != nil {
+		t.Skipf("ping.exe unavailable: %v", err)
+	}
+	root, err := filepath.Abs(localTempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &windowsBackend{root: root, stdout: io.Discard, stderr: io.Discard}
+	if err := b.start([]string{"--name", "probe", "--no-enable", "--restart", "no", "--", ping, "-n", "120", "127.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.stop("probe") })
+	before := b.readState("probe")
+
+	// A "new" spm-supervisor that exits immediately.
+	broken := filepath.Join(root, "broken-runtime")
+	if err := os.MkdirAll(broken, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(ping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(broken, "spm-supervisor.exe"), data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SPM_RUNTIME_DIR", broken)
+
+	outcome, err := b.upgradeUserService("probe", true)
+	if err == nil || !strings.Contains(err.Error(), "previous supervisor took the service back") {
+		t.Fatalf("upgrade = %q, %v; want a rollback error", outcome, err)
+	}
+	after := b.readState("probe")
+	if after.PID != before.PID || !windowsProcessAlive(before.PID) {
+		t.Fatalf("rollback restarted the service: pid %d -> %d", before.PID, after.PID)
+	}
+	if after.SupervisorPID <= 0 || after.SupervisorPID == before.SupervisorPID || !windowsProcessAlive(after.SupervisorPID) {
+		t.Fatalf("no supervisor took the service back: %+v", after)
+	}
+}
+
+func TestParseUpgradeComponents(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		want upgradeComponents
+	}{
+		{nil, upgradeComponents{supervisor: true, scheduler: true}},
+		{[]string{"--allow-restart"}, upgradeComponents{supervisor: true, scheduler: true, allowRestart: true}},
+		{[]string{"--supervisor", "--allow-restart"}, upgradeComponents{supervisor: true, allowRestart: true}},
+		{[]string{"--scheduler"}, upgradeComponents{scheduler: true}},
+	} {
+		got, err := parseUpgradeComponents(test.args)
+		if err != nil || got != test.want {
+			t.Errorf("parseUpgradeComponents(%v) = %+v, %v; want %+v", test.args, got, err, test.want)
+		}
+		if again, _ := parseUpgradeComponents(got.flags()); again != got {
+			t.Errorf("flags() of %+v do not round-trip: %+v", got, again)
+		}
+	}
+	if _, err := parseUpgradeComponents([]string{"--restart"}); err == nil {
+		t.Error("unknown option accepted")
 	}
 }

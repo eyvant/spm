@@ -180,3 +180,33 @@ func TestJobNameScopesByRootAndNamespace(t *testing.T) {
 		t.Fatal("different roots share a job name")
 	}
 }
+
+// A supervisor that finds a live process it cannot take over refuses to
+// start rather than terminating it or starting a second one.
+func TestSuperviseRefusesProcessItCannotTakeOver(t *testing.T) {
+	const name = "refuse"
+	l := handoffLayout(t, name)
+	ping, _ := exec.LookPath("ping.exe")
+	stranger := exec.Command(ping, "-n", "30", "127.0.0.1")
+	if err := stranger.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stranger.Process.Kill(); _, _ = stranger.Process.Wait() })
+	job, err := createJob(l, name) // held, as during a handoff
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(job)
+	if err := l.WriteState(State{Version: StateVersion, Name: name, Status: "running", PID: stranger.Process.Pid}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Supervise(l, name); err == nil {
+		t.Fatal("Supervise started although a process it cannot take over is waiting")
+	}
+	if !alive(stranger.Process.Pid) {
+		t.Fatal("Supervise terminated the waiting process")
+	}
+	if s := l.ReadState(name); s.PID != stranger.Process.Pid {
+		t.Fatalf("Supervise replaced the recorded process: %+v", s)
+	}
+}
