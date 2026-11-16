@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eyvant/spm/internal/runtime/common"
 	"golang.org/x/sys/windows"
 )
 
@@ -114,7 +115,7 @@ func TestWriteWindowsScheduleLauncherHidesRunner(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := string(data)
-	for _, want := range []string{`shell.Run(`, `, 0, True)`, `__scheduled-run`, `"C:\Program Files\spm\spm.exe"`, `--activation`, `timer`} {
+	for _, want := range []string{`shell.Run(`, `, 0, True)`, `""run""`, `"C:\Program Files\spm\spm.exe"`, `--activation`, `timer`} {
 		if !strings.Contains(script, want) {
 			t.Errorf("launcher does not contain %q:\n%s", want, script)
 		}
@@ -743,10 +744,10 @@ func TestWindowsSchedulerDaemonNamesAreScopedToRoot(t *testing.T) {
 }
 
 func TestWindowsProcessAndEmptySchedulerPaths(t *testing.T) {
-	if windowsProcessAlive(0) || portableProcessAlive(-1) {
+	if windowsProcessAlive(0) || common.ProcessAlive(-1) {
 		t.Fatal("non-positive process ID reported alive")
 	}
-	if !windowsProcessAlive(os.Getpid()) || !portableProcessAlive(os.Getpid()) {
+	if !windowsProcessAlive(os.Getpid()) || !common.ProcessAlive(os.Getpid()) {
 		t.Fatal("current process reported dead")
 	}
 	if windowsProcessAlive(1 << 30) {

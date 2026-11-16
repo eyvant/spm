@@ -85,7 +85,7 @@ func TestDarwinThrottleRoundsRestartDelayUp(t *testing.T) {
 func TestRenderDarwinSchedulePlistUsesPortableRunner(t *testing.T) {
 	config := darwinServiceConfig{Name: "backup", Description: "Nightly & safe", Enabled: true, Schedule: "*/5 * * * *"}
 	plist := renderDarwinSchedulePlist(config, "com.eyvant.spm.backup", "/usr/local/bin/spm", "/tmp/schedule.json", "/tmp/state", "/tmp/task.log", "timer", false)
-	for _, want := range []string{"<key>StartInterval</key>", "<integer>60</integer>", "__scheduled-run", "Nightly &amp; safe", "<string>timer</string>"} {
+	for _, want := range []string{"<key>StartInterval</key>", "<integer>60</integer>", "<string>run</string>", "Nightly &amp; safe", "<string>timer</string>"} {
 		if !strings.Contains(plist, want) {
 			t.Errorf("schedule plist does not contain %q:\n%s", want, plist)
 		}
@@ -95,7 +95,7 @@ func TestRenderDarwinSchedulePlistUsesPortableRunner(t *testing.T) {
 func TestRenderDarwinDaemonExecutorHasNoPollingInterval(t *testing.T) {
 	config := darwinServiceConfig{Name: "backup", Enabled: true, Schedule: "30 0 4 * * *"}
 	plist := renderDarwinSchedulePlist(config, "com.eyvant.spm.backup", "/usr/local/bin/spm", "/tmp/schedule.json", "/tmp/state", "/tmp/task.log", "daemon", false)
-	if !strings.Contains(plist, "__scheduled-run") || !strings.Contains(plist, "<string>daemon</string>") {
+	if !strings.Contains(plist, "<string>run</string>") || !strings.Contains(plist, "<string>daemon</string>") {
 		t.Fatalf("unexpected daemon executor plist:\n%s", plist)
 	}
 	if strings.Contains(plist, "<key>StartInterval</key>") || strings.Contains(plist, "<key>RunAtLoad</key>") {
@@ -105,7 +105,7 @@ func TestRenderDarwinDaemonExecutorHasNoPollingInterval(t *testing.T) {
 
 func TestRenderDarwinScheduleDaemon(t *testing.T) {
 	plist := renderDarwinScheduleDaemonPlist("com.eyvant.spm.scheduler", "/usr/local/bin/spm", "/tmp/spm", "gui/501", "/tmp/scheduler.log")
-	for _, want := range []string{"__darwin-schedule-daemon", "<key>RunAtLoad</key>", "<key>KeepAlive</key>", "<string>gui/501</string>"} {
+	for _, want := range []string{"<string>daemon</string>", "<key>RunAtLoad</key>", "<key>KeepAlive</key>", "<string>gui/501</string>"} {
 		if !strings.Contains(plist, want) {
 			t.Errorf("scheduler plist does not contain %q:\n%s", want, plist)
 		}
@@ -314,14 +314,14 @@ func TestDarwinUpgradeRuntimeRestartsSchedulerDaemon(t *testing.T) {
 	b := &darwinBackend{root: root, plistDir: filepath.Join(root, "plists"), uid: os.Getuid(), stdout: &output, stderr: io.Discard}
 
 	// Without scheduled jobs there is no daemon to restart.
-	if err := b.upgradeRuntime(); err != nil || len(calls) != 0 || output.Len() != 0 {
+	if err := b.upgradeRuntime(upgradeComponents{supervisor: true, scheduler: true}); err != nil || len(calls) != 0 || output.Len() != 0 {
 		t.Fatalf("empty upgrade = %v, calls %q, output %q", err, calls, output.String())
 	}
 	if err := b.schedule([]string{"--name", "job", "--interval", "5min", "--", "go", "version"}); err != nil {
 		t.Fatal(err)
 	}
 	calls, output = nil, bytes.Buffer{}
-	if err := b.upgradeRuntime(); err != nil {
+	if err := b.upgradeRuntime(upgradeComponents{supervisor: true, scheduler: true}); err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(calls, "\n")

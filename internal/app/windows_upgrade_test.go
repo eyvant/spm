@@ -120,7 +120,7 @@ func TestWindowsUpgradeRuntimeWithNothingRunning(t *testing.T) {
 	if err := b.writeConfig(stopped); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.upgradeRuntime(); err != nil {
+	if err := b.upgradeRuntime(upgradeComponents{supervisor: true, scheduler: true}); err != nil {
 		t.Fatal(err)
 	}
 	if output.Len() != 0 {

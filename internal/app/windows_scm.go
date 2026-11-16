@@ -15,65 +15,21 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/eyvant/spm/internal/runtime/supervisor"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
-const windowsServicePrefix = "spm-"
-
 var windowsExecCommand = exec.Command
 
 func windowsIsElevated() bool { return windows.GetCurrentProcessToken().IsElevated() }
 
-type windowsSCMHandler struct {
-	backend *windowsBackend
-	name    string
+func (b *windowsBackend) scmName(name string) string { return supervisor.SCMName(name) }
+
+func runWindowsSCMService(b *windowsBackend, name string) error {
+	return supervisor.RunService(b.layout(), name)
 }
-
-func runWindowsSCMService(backend *windowsBackend, name string) error {
-	return svc.Run(backend.scmName(name), &windowsSCMHandler{backend: backend, name: name})
-}
-
-func (handler *windowsSCMHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, changes chan<- svc.Status) (bool, uint32) {
-	changes <- svc.Status{State: svc.StartPending, WaitHint: 15000}
-	done := make(chan error, 1)
-	go func() { done <- handler.backend.supervise(handler.name) }()
-
-	status := svc.Status{State: svc.StartPending, WaitHint: 15000}
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	stopping := false
-	for {
-		select {
-		case <-done:
-			return false, 0
-		case request := <-requests:
-			switch request.Cmd {
-			case svc.Interrogate:
-				changes <- status
-			case svc.Stop, svc.Shutdown:
-				if !stopping {
-					stopping = true
-					status = svc.Status{State: svc.StopPending, WaitHint: 30000}
-					changes <- status
-					_ = handler.backend.writeControl(handler.name, "stop")
-				}
-			}
-		case <-ticker.C:
-			if stopping {
-				continue
-			}
-			state := handler.backend.readState(handler.name)
-			if state.Status == "running" && state.PID > 0 && status.State != svc.Running {
-				status = svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
-				changes <- status
-			}
-		}
-	}
-}
-
-func (b *windowsBackend) scmName(name string) string { return windowsServicePrefix + name }
 
 func (b *windowsBackend) scmInstalled(name string) bool {
 	manager, err := mgr.Connect()
@@ -94,14 +50,16 @@ func (b *windowsBackend) installSCMService(name string) error {
 	if err != nil {
 		return err
 	}
-	executable, err := os.Executable()
+	executable, err := runtimeExecutable(supervisorRuntime)
 	if err != nil {
-		return fmt.Errorf("resolve spm executable: %w", err)
+		return err
 	}
+	// Each system service runs its own copy, so a supervisor upgrade can be
+	// rolled out service by service and never touches a running binary.
 	stableExecutable := filepath.Join(b.serviceDir(name), "spm-supervisor.exe")
 	data, err := os.ReadFile(executable)
 	if err != nil {
-		return fmt.Errorf("read spm executable for system service: %w", err)
+		return fmt.Errorf("read spm-supervisor for system service: %w", err)
 	}
 	if err := writeFileAtomic(stableExecutable, data, 0o700); err != nil {
 		return fmt.Errorf("install system supervisor executable: %w", err)
@@ -113,8 +71,23 @@ func (b *windowsBackend) installSCMService(name string) error {
 	}
 	defer manager.Disconnect()
 	if existing, openErr := manager.OpenService(b.scmName(name)); openErr == nil {
-		_ = existing.Close()
-		return b.configureSCMStartType(name, config.Enabled)
+		defer existing.Close()
+		// Services registered by older versions run spm.exe's
+		// __windows-service entry point; point them at spm-supervisor.
+		current, err := existing.Config()
+		if err != nil {
+			return fmt.Errorf("read Windows service configuration: %w", err)
+		}
+		current.BinaryPathName = windowsSCMCommandLine(stableExecutable, b.root, name)
+		current.StartType = mgr.StartManual
+		if config.Enabled {
+			current.StartType = mgr.StartAutomatic
+		}
+		current.Password = ""
+		if err := existing.UpdateConfig(current); err != nil {
+			return fmt.Errorf("update Windows service %s: %w", b.scmName(name), err)
+		}
+		return nil
 	}
 
 	account := config.RunAs
@@ -160,7 +133,7 @@ func (b *windowsBackend) installSCMService(name string) error {
 			DisplayName:      "spm: " + name,
 			Description:      description,
 		},
-		"__windows-service", "--root", b.root, name,
+		"service", "--root", b.root, name,
 	)
 	password = ""
 	if err != nil {
@@ -441,4 +414,14 @@ func windowsNTStatusError(converter *windows.LazyProc, status uintptr) error {
 		return fmt.Errorf("NTSTATUS 0x%x", status)
 	}
 	return syscall.Errno(code)
+}
+
+// windowsSCMCommandLine is the command line CreateService builds for the
+// supervisor copy of a system service.
+func windowsSCMCommandLine(executable, root, name string) string {
+	line := syscall.EscapeArg(executable)
+	for _, argument := range []string{"service", "--root", root, name} {
+		line += " " + syscall.EscapeArg(argument)
+	}
+	return line
 }

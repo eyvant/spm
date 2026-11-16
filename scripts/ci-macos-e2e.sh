@@ -153,11 +153,12 @@ command_spm "${schedule_args[@]}"
 SCHEDULE_PLIST=$PLIST_DIR/com.eyvant.spm.$SCHEDULE.plist
 test -f "$SCHEDULE_PLIST"
 ! grep -F '<key>StartInterval</key>' "$SCHEDULE_PLIST"
-grep -F '__scheduled-run' "$SCHEDULE_PLIST"
+grep -F 'spm-scheduler' "$SCHEDULE_PLIST"
+grep -F '<string>run</string>' "$SCHEDULE_PLIST"
 grep -F '<string>daemon</string>' "$SCHEDULE_PLIST"
 SCHEDULER_PLIST=$PLIST_DIR/com.eyvant.spm.scheduler.plist
 test -f "$SCHEDULER_PLIST"
-grep -F '__darwin-schedule-daemon' "$SCHEDULER_PLIST"
+grep -F '<string>daemon</string>' "$SCHEDULER_PLIST"
 grep -F '<key>KeepAlive</key>' "$SCHEDULER_PLIST"
 command_spm native launchd print "$SCHEDULE" | grep -F "com.eyvant.spm.$SCHEDULE"
 for _ in {1..30}; do
@@ -194,7 +195,7 @@ command_spm validate "$SCHEDULE_TOML"
 command_spm apply --dry-run "$SCHEDULE_TOML" | grep -F $'create\t'"$SCHEDULE_DECLARED"
 command_spm apply "$SCHEDULE_TOML"
 test ! -e "$PLIST_DIR/com.eyvant.spm.$SCHEDULE_DECLARED.plist"
-command_spm cat "$SCHEDULE_DECLARED" | grep -F '__scheduled-run'
+command_spm cat "$SCHEDULE_DECLARED" | grep -F 'spm-scheduler'
 command_spm diff "$SCHEDULE_TOML" | grep -F $'unchanged\t'"$SCHEDULE_DECLARED"
 
 echo "==> macOS $SCOPE scheduled log rotation"

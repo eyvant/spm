@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/eyvant/spm/internal/runtime/scheduler"
 )
 
 func TestValidateTimerDeclarationBranches(t *testing.T) {
@@ -311,46 +313,46 @@ func TestUpdateFromSavedConfigAndDescribe(t *testing.T) {
 }
 
 func TestPortableScheduleRecordValidationAndPersistence(t *testing.T) {
-	valid := portableScheduleRecord{Version: portableScheduleVersion, Name: "job", Command: []string{"go", "version"}, Schedule: "0 * * * *"}
-	for name, record := range map[string]portableScheduleRecord{
-		"missing name":            {Version: portableScheduleVersion, Command: []string{"go"}, Schedule: "0 * * * *"},
+	valid := scheduler.Record{Version: scheduler.RecordVersion, Name: "job", Command: []string{"go", "version"}, Schedule: "0 * * * *"}
+	for name, record := range map[string]scheduler.Record{
+		"missing name":            {Version: scheduler.RecordVersion, Command: []string{"go"}, Schedule: "0 * * * *"},
 		"wrong version":           {Version: 99, Name: "job", Command: []string{"go"}, Schedule: "0 * * * *"},
-		"no trigger":              {Version: portableScheduleVersion, Name: "job", Command: []string{"go"}},
-		"bad cron":                {Version: portableScheduleVersion, Name: "job", Command: []string{"go"}, Schedule: "bad"},
-		"bad timezone":            {Version: portableScheduleVersion, Name: "job", Command: []string{"go"}, Schedule: "0 * * * *", Timezone: "Nowhere/Invalid"},
-		"timezone without cron":   {Version: portableScheduleVersion, Name: "job", Command: []string{"go"}, TimerInterval: "5m", Timezone: "UTC"},
-		"bad duration":            {Version: portableScheduleVersion, Name: "job", Command: []string{"go"}, TimerOnBoot: "soon"},
-		"sub-second interval":     {Version: portableScheduleVersion, Name: "job", Command: []string{"go"}, TimerInterval: "10ms"},
-		"persistent without cron": {Version: portableScheduleVersion, Name: "job", Command: []string{"go"}, TimerInterval: "5m", Persistent: true},
+		"no trigger":              {Version: scheduler.RecordVersion, Name: "job", Command: []string{"go"}},
+		"bad cron":                {Version: scheduler.RecordVersion, Name: "job", Command: []string{"go"}, Schedule: "bad"},
+		"bad timezone":            {Version: scheduler.RecordVersion, Name: "job", Command: []string{"go"}, Schedule: "0 * * * *", Timezone: "Nowhere/Invalid"},
+		"timezone without cron":   {Version: scheduler.RecordVersion, Name: "job", Command: []string{"go"}, TimerInterval: "5m", Timezone: "UTC"},
+		"bad duration":            {Version: scheduler.RecordVersion, Name: "job", Command: []string{"go"}, TimerOnBoot: "soon"},
+		"sub-second interval":     {Version: scheduler.RecordVersion, Name: "job", Command: []string{"go"}, TimerInterval: "10ms"},
+		"persistent without cron": {Version: scheduler.RecordVersion, Name: "job", Command: []string{"go"}, TimerInterval: "5m", Persistent: true},
 	} {
-		if err := validatePortableSchedule(record); err == nil {
+		if err := scheduler.Validate(record); err == nil {
 			t.Errorf("%s: record unexpectedly valid", name)
 		}
 	}
-	if err := validatePortableSchedule(valid); err != nil {
+	if err := scheduler.Validate(valid); err != nil {
 		t.Fatal(err)
 	}
 
 	directory := localTempDir(t)
 	path := filepath.Join(directory, "nested", "job.json")
 	stateDir := filepath.Join(directory, "state")
-	if err := preparePortableScheduleUpdate(path, stateDir, &valid); err != nil {
+	if err := scheduler.PrepareUpdate(path, stateDir, &valid); err != nil {
 		t.Fatalf("prepare without previous record: %v", err)
 	}
 	record := valid
 	record.Version = 0
-	if err := writePortableSchedule(path, record); err != nil {
+	if err := scheduler.WriteRecord(path, record); err != nil {
 		t.Fatal(err)
 	}
-	if err := writePortableSchedule(path, portableScheduleRecord{Name: "job"}); err == nil {
+	if err := scheduler.WriteRecord(path, scheduler.Record{Name: "job"}); err == nil {
 		t.Fatal("invalid record unexpectedly written")
 	}
-	saved, err := readPortableSchedule(path)
-	if err != nil || saved.CreatedAt.IsZero() || saved.Version != portableScheduleVersion {
+	saved, err := scheduler.ReadRecord(path)
+	if err != nil || saved.CreatedAt.IsZero() || saved.Version != scheduler.RecordVersion {
 		t.Fatalf("saved record = %+v, %v", saved, err)
 	}
 	same := valid
-	if err := preparePortableScheduleUpdate(path, stateDir, &same); err != nil || !same.CreatedAt.Equal(saved.CreatedAt) {
+	if err := scheduler.PrepareUpdate(path, stateDir, &same); err != nil || !same.CreatedAt.Equal(saved.CreatedAt) {
 		t.Fatalf("unchanged schedule did not keep CreatedAt: %+v, %v", same, err)
 	}
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
@@ -358,7 +360,7 @@ func TestPortableScheduleRecordValidationAndPersistence(t *testing.T) {
 	}
 	changed := valid
 	changed.Schedule = "30 * * * *"
-	if err := preparePortableScheduleUpdate(path, stateDir, &changed); err != nil {
+	if err := scheduler.PrepareUpdate(path, stateDir, &changed); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
@@ -367,47 +369,47 @@ func TestPortableScheduleRecordValidationAndPersistence(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := preparePortableScheduleUpdate(path, stateDir, &changed); err == nil {
+	if err := scheduler.PrepareUpdate(path, stateDir, &changed); err == nil {
 		t.Fatal("corrupt previous record unexpectedly accepted")
 	}
 
 	statePath := filepath.Join(directory, "state2", "state.json")
 	code := 3
-	if err := writePortableScheduleState(statePath, portableScheduleState{Version: portableScheduleVersion, LastExitCode: &code}); err != nil {
+	if err := scheduler.WriteState(statePath, scheduler.State{Version: scheduler.RecordVersion, LastExitCode: &code}); err != nil {
 		t.Fatal(err)
 	}
-	if state := readPortableScheduleState(statePath); state.LastExitCode == nil || *state.LastExitCode != 3 {
+	if state := scheduler.ReadState(statePath); state.LastExitCode == nil || *state.LastExitCode != 3 {
 		t.Fatalf("state = %+v", state)
 	}
 	if err := os.WriteFile(statePath, []byte(`{"version": 42}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if state := readPortableScheduleState(statePath); state.LastExitCode != nil {
+	if state := scheduler.ReadState(statePath); state.LastExitCode != nil {
 		t.Fatalf("mismatched state version was not reset: %+v", state)
 	}
-	if scheduleExitCode(nil) != "-" || scheduleExitCode(&code) != "3" {
-		t.Fatal("scheduleExitCode formatting is incorrect")
+	if scheduler.FormatExitCode(nil) != "-" || scheduler.FormatExitCode(&code) != "3" {
+		t.Fatal("scheduler.FormatExitCode formatting is incorrect")
 	}
-	if formatScheduleTime(time.Time{}) != "-" || formatScheduleTime(time.Unix(0, 0).UTC()) != "1970-01-01T00:00:00Z" {
-		t.Fatal("formatScheduleTime formatting is incorrect")
+	if scheduler.FormatTime(time.Time{}) != "-" || scheduler.FormatTime(time.Unix(0, 0).UTC()) != "1970-01-01T00:00:00Z" {
+		t.Fatal("scheduler.FormatTime formatting is incorrect")
 	}
 
 	due := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	valid.Timezone = "UTC"
-	if key, err := portableOccurrenceKey(valid, due); err != nil || key != "cron:2026-01-02T03:04" {
+	if key, err := scheduler.OccurrenceKey(valid, due); err != nil || key != "cron:2026-01-02T03:04" {
 		t.Fatalf("cron key = %q, %v", key, err)
 	}
 	seconds := valid
 	seconds.Schedule = "*/5 * * * * *"
-	if key, err := portableOccurrenceKey(seconds, due); err != nil || key != "cron:2026-01-02T03:04:05" {
+	if key, err := scheduler.OccurrenceKey(seconds, due); err != nil || key != "cron:2026-01-02T03:04:05" {
 		t.Fatalf("seconds cron key = %q, %v", key, err)
 	}
-	if key, err := portableOccurrenceKey(portableScheduleRecord{TimerInterval: "5m"}, due); err != nil || !strings.HasPrefix(key, "timer:") {
+	if key, err := scheduler.OccurrenceKey(scheduler.Record{TimerInterval: "5m"}, due); err != nil || !strings.HasPrefix(key, "timer:") {
 		t.Fatalf("timer key = %q, %v", key, err)
 	}
-	for _, record := range []portableScheduleRecord{{Schedule: "0 * * * *", Timezone: "Nowhere/Invalid"}, {Schedule: "bad"}} {
-		if _, err := portableOccurrenceKey(record, due); err == nil {
-			t.Errorf("portableOccurrenceKey(%+v) unexpectedly succeeded", record)
+	for _, record := range []scheduler.Record{{Schedule: "0 * * * *", Timezone: "Nowhere/Invalid"}, {Schedule: "bad"}} {
+		if _, err := scheduler.OccurrenceKey(record, due); err == nil {
+			t.Errorf("scheduler.OccurrenceKey(%+v) unexpectedly succeeded", record)
 		}
 	}
 }

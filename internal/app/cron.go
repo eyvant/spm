@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/eyvant/spm/internal/runtime/scheduler"
 )
 
 func cronToOnCalendar(expression string) (string, error) {
@@ -22,7 +24,7 @@ func cronToOnCalendars(expression string) ([]string, error) {
 	if len(fields) != 5 && len(fields) != 6 {
 		return nil, fmt.Errorf("expected 5 or 6 fields, got %d", len(fields))
 	}
-	if _, err := parseCronExpression(expression); err != nil {
+	if _, err := scheduler.ParseCron(expression); err != nil {
 		return nil, err
 	}
 	offset := 0
@@ -106,11 +108,11 @@ func convertCronPart(part string, minimum, maximum, stepStart int) (string, erro
 	}
 	if strings.Count(base, "-") == 1 {
 		bounds := strings.SplitN(base, "-", 2)
-		start, err := parseCronNumber(bounds[0], minimum, maximum)
+		start, err := scheduler.ParseCronNumber(bounds[0], minimum, maximum)
 		if err != nil {
 			return "", err
 		}
-		end, err := parseCronNumber(bounds[1], minimum, maximum)
+		end, err := scheduler.ParseCronNumber(bounds[1], minimum, maximum)
 		if err != nil {
 			return "", err
 		}
@@ -122,19 +124,11 @@ func convertCronPart(part string, minimum, maximum, stepStart int) (string, erro
 	if hasStep {
 		return "", fmt.Errorf("step %q requires * or a range", part)
 	}
-	value, err := parseCronNumber(part, minimum, maximum)
+	value, err := scheduler.ParseCronNumber(part, minimum, maximum)
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("%02d", value), nil
-}
-
-func parseCronNumber(raw string, minimum, maximum int) (int, error) {
-	value, err := strconv.Atoi(raw)
-	if err != nil || value < minimum || value > maximum {
-		return 0, fmt.Errorf("value %q must be between %d and %d", raw, minimum, maximum)
-	}
-	return value, nil
 }
 
 func convertCronWeekday(field string) (string, error) {
@@ -146,11 +140,11 @@ func convertCronWeekday(field string) (string, error) {
 	converted := make([]string, 0, len(parts))
 	for _, part := range parts {
 		if strings.Contains(part, "/") {
-			parsed, err := parsePortableCronField(part, 0, 7, true)
+			parsed, err := scheduler.ParseCronField(part, 0, 7, true)
 			if err != nil {
 				return "", err
 			}
-			for value, set := range parsed.values {
+			for value, set := range parsed.Values {
 				if set {
 					converted = append(converted, names[value])
 				}
@@ -159,11 +153,11 @@ func convertCronWeekday(field string) (string, error) {
 		}
 		if strings.Count(part, "-") == 1 {
 			bounds := strings.SplitN(part, "-", 2)
-			start, err := parseCronNumber(bounds[0], 0, 7)
+			start, err := scheduler.ParseCronNumber(bounds[0], 0, 7)
 			if err != nil {
 				return "", err
 			}
-			end, err := parseCronNumber(bounds[1], 0, 7)
+			end, err := scheduler.ParseCronNumber(bounds[1], 0, 7)
 			if err != nil {
 				return "", err
 			}
@@ -187,7 +181,7 @@ func convertCronWeekday(field string) (string, error) {
 			}
 			continue
 		}
-		value, err := parseCronNumber(part, 0, 7)
+		value, err := scheduler.ParseCronNumber(part, 0, 7)
 		if err != nil {
 			return "", err
 		}

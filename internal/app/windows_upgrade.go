@@ -11,37 +11,35 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eyvant/spm/internal/runtime/scheduler"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
-// upgradeRuntime moves every running spm process in this scope onto the
-// installed executable:
-//   - the scheduler daemon is replaced by a fresh one;
-//   - user services whose supervisor is running are stopped and started again
-//     (the supervisor holds its service in a kill-on-close job, so swapping it
-//     always restarts the service);
-//   - system services get a fresh spm-supervisor.exe copy, and the ones that
-//     were running are started again.
+// upgradeRuntime moves this scope's background processes onto the installed
+// runtimes.
 //
-// A scheduled job that is executing right now is left to finish; its next run
-// uses the new binary.
-func (b *windowsBackend) upgradeRuntime() error {
+// scheduler: every job launcher is rewritten to run spm-scheduler (older
+// versions ran `spm.exe __scheduled-run`) and the scheduler daemon is
+// replaced. A job that is executing right now is left to finish; its next
+// run uses the new binary. Services are not touched.
+//
+// supervisor: user services whose supervisor is running are stopped and
+// started again (the supervisor holds its service in a kill-on-close job, so
+// swapping it always restarts the service); system services get a fresh
+// spm-supervisor.exe copy, and the ones that were running are started again.
+func (b *windowsBackend) upgradeRuntime(components upgradeComponents) error {
 	var errs []error
-	tasks, err := discoverPortableSchedulerTasks(b.root)
-	if err != nil {
-		errs = append(errs, fmt.Errorf("find scheduled jobs: %w", err))
-	} else if len(tasks) > 0 {
-		if err := b.refreshScheduleDaemon(); err != nil {
-			errs = append(errs, fmt.Errorf("restart spm scheduler: %w", err))
-		} else {
-			fmt.Fprintln(b.stdout, "spm scheduler restarted")
-		}
-	}
 	names, err := b.names()
 	if err != nil {
-		return errors.Join(append(errs, err)...)
+		return err
+	}
+	if components.scheduler {
+		errs = append(errs, b.upgradeScheduler(names)...)
+	}
+	if !components.supervisor {
+		return errors.Join(errs...)
 	}
 	for _, name := range names {
 		config, err := b.readConfig(name)
@@ -68,6 +66,43 @@ func (b *windowsBackend) upgradeRuntime() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func (b *windowsBackend) upgradeScheduler(names []string) []error {
+	var errs []error
+	executable, err := runtimeExecutable(schedulerRuntime)
+	if err != nil {
+		return []error{err}
+	}
+	for _, name := range names {
+		config, err := b.readConfig(name)
+		if err != nil || config.Mode != "schedule" {
+			continue
+		}
+		// Only the launcher scripts change; the Task Scheduler tasks keep
+		// running them, so a run in progress is not interrupted.
+		for _, activation := range []string{"daemon", "boot"} {
+			launcher := b.scheduleLauncherPath(name, activation)
+			if _, err := os.Stat(launcher); err != nil {
+				continue
+			}
+			if err := writeWindowsScheduleLauncher(launcher, executable, b.scheduleRecordPath(name), b.scheduleStateDir(name), b.logPath(name), activation); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			}
+		}
+	}
+	tasks, err := scheduler.DiscoverTasks(b.root)
+	if err != nil {
+		return append(errs, fmt.Errorf("find scheduled jobs: %w", err))
+	}
+	if len(tasks) > 0 {
+		if err := b.refreshScheduleDaemon(); err != nil {
+			errs = append(errs, fmt.Errorf("restart spm scheduler: %w", err))
+		} else {
+			fmt.Fprintln(b.stdout, "spm scheduler restarted")
+		}
+	}
+	return errs
 }
 
 func (b *windowsBackend) upgradeUserService(name string) (bool, error) {

@@ -1,4 +1,4 @@
-package app
+package common
 
 import (
 	"bytes"
@@ -9,7 +9,7 @@ import (
 
 func TestRotatingLogRotatesDuringWritesAndRetainsBackups(t *testing.T) {
 	path := filepath.Join(localTempDir(t), "service.log")
-	log, err := openRotatingLog(path, 10, 2)
+	log, err := OpenRotatingLog(path, 10, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,8 +37,8 @@ func TestRotatingLogRotatesDuringWritesAndRetainsBackups(t *testing.T) {
 }
 
 func TestRotatingLogSplitsSingleLargeWrite(t *testing.T) {
-	path := filepath.Join(localTempDir(t), "scheduler.log")
-	log, err := openRotatingLog(path, 5, 2)
+	path := filepath.Join(localTempDir(t), "log")
+	log, err := OpenRotatingLog(path, 5, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestRotatingLogRotatesOversizedFileWhenOpened(t *testing.T) {
 	if err := os.WriteFile(path, []byte("oversized"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	log, err := openRotatingLog(path, 5, 1)
+	log, err := OpenRotatingLog(path, 5, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestPrintRotatedLogTailReadsBackupsInOrder(t *testing.T) {
 		}
 	}
 	var output bytes.Buffer
-	if err := printRotatedLogTail(&output, path, 2, ""); err != nil {
+	if err := PrintRotatedLogTail(&output, path, 2, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := output.String(); got != "two\nthree\n" {
@@ -102,7 +102,7 @@ func TestPrintRotatedLogTailReadsBackupsInOrder(t *testing.T) {
 
 func TestReadRotatingLogUpdatesFollowsReplacementFile(t *testing.T) {
 	path := filepath.Join(localTempDir(t), "service.log")
-	log, err := openRotatingLog(path, 4, 2)
+	log, err := OpenRotatingLog(path, 4, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestReadRotatingLogUpdatesFollowsReplacementFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	current, offset, err := readRotatingLogUpdates(&output, path, previous, previous.Size(), "")
+	current, offset, err := ReadRotatingLogUpdates(&output, path, previous, previous.Size(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,8 +135,8 @@ func TestReadRotatingLogUpdatesFollowsReplacementFile(t *testing.T) {
 func TestRotatingLogValidationAndEdgePaths(t *testing.T) {
 	path := filepath.Join(localTempDir(t), "edge.log")
 	for _, limits := range [][2]int64{{0, 1}, {1, -1}} {
-		if _, err := openRotatingLog(path, limits[0], int(limits[1])); err == nil {
-			t.Errorf("openRotatingLog limits %v unexpectedly succeeded", limits)
+		if _, err := OpenRotatingLog(path, limits[0], int(limits[1])); err == nil {
+			t.Errorf("OpenRotatingLog limits %v unexpectedly succeeded", limits)
 		}
 	}
 	if err := os.WriteFile(path, []byte("discard"), 0o600); err != nil {
@@ -150,7 +150,7 @@ func TestRotatingLogValidationAndEdgePaths(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	previous, offset, err := readRotatingLogUpdates(&output, path, nil, 7, "")
+	previous, offset, err := ReadRotatingLogUpdates(&output, path, nil, 7, "")
 	if err != nil || previous != nil || offset != 7 {
 		t.Fatalf("missing update = %#v, %d, %v", previous, offset, err)
 	}
@@ -162,18 +162,18 @@ func TestRotatingLogValidationAndEdgePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	output.Reset()
-	current, next, err := readRotatingLogUpdates(&output, path, info, info.Size()+10, "two")
+	current, next, err := ReadRotatingLogUpdates(&output, path, info, info.Size()+10, "two")
 	if err != nil || current == nil || next != info.Size() || output.String() != "two\n" {
 		t.Fatalf("truncated update = %#v, %d, %q, %v", current, next, output.String(), err)
 	}
 	directory := localTempDir(t)
-	if err := printRotatedLogTail(&output, directory, 1, ""); err == nil {
+	if err := PrintRotatedLogTail(&output, directory, 1, ""); err == nil {
 		t.Fatal("tailing a directory unexpectedly succeeded")
 	}
 	if _, err := printLogFromOffset(&output, directory, 0, ""); err == nil {
 		t.Fatal("reading a directory unexpectedly succeeded")
 	}
-	log := &rotatingLog{}
+	log := &RotatingLog{}
 	if err := log.Close(); err != nil {
 		t.Fatal(err)
 	}

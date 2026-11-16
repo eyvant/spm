@@ -15,6 +15,8 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/eyvant/spm/internal/runtime/scheduler"
 )
 
 var (
@@ -200,7 +202,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return (&application{stdout: stdout, stderr: stderr}).healthProbeCLI(args[1:])
 	}
 	if args[0] == "__scheduled-run" {
-		return runPortableSchedule(args[1:], stdout, stderr)
+		return scheduler.Run(args[1:], stdout, stderr)
 	}
 	if args[0] == "__upgrade-runtime" {
 		return runUpgradeRuntime(args[1:], stdout, stderr, system)

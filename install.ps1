@@ -16,14 +16,46 @@ if ($Force -and -not $Uninstall) {
     throw "-Force is only valid with -Uninstall"
 }
 
-# A running spm.exe cannot be overwritten, but it can be renamed. Earlier
-# upgrades leave the previous binary as spm.exe.old*; delete the ones that no
+# spm.exe is the CLI. spm-supervisor.exe runs user services and is copied into
+# each system service; spm-scheduler.exe runs scheduled jobs. The runtimes
+# carry their own version and are replaced only when it changes, so upgrading
+# the CLI alone never restarts anything.
+$runtimes = [ordered]@{
+    "spm-supervisor.exe" = "--supervisor"
+    "spm-scheduler.exe"  = "--scheduler"
+}
+
+# A running executable cannot be overwritten, but it can be renamed. Earlier
+# upgrades leave previous binaries as *.exe.old*; delete the ones that no
 # process uses any more.
 function Remove-StaleExecutables([string]$Directory) {
     if (-not (Test-Path -LiteralPath $Directory)) { return }
-    Get-ChildItem -Force -LiteralPath $Directory -Filter "spm.exe.old*" | ForEach-Object {
+    Get-ChildItem -Force -LiteralPath $Directory -Filter "spm*.exe.old*" | ForEach-Object {
         try { Remove-Item -Force -LiteralPath $_.FullName -ErrorAction Stop } catch { }
     }
+}
+
+# Install-Executable moves an existing file aside and copies the new one in.
+function Install-Executable([string]$Source, [string]$Target) {
+    $previous = $null
+    if (Test-Path -LiteralPath $Target) {
+        $previous = "$Target.old"
+        if (Test-Path -LiteralPath $previous) {
+            $previous = "$Target.old-" + [guid]::NewGuid().ToString("N")
+        }
+        Move-Item -LiteralPath $Target -Destination $previous
+    }
+    try {
+        Copy-Item -LiteralPath $Source -Destination $Target
+    } catch {
+        if ($previous) { Move-Item -Force -LiteralPath $previous -Destination $Target }
+        throw
+    }
+}
+
+function Get-RuntimeVersion([string]$Executable) {
+    if (-not (Test-Path -LiteralPath $Executable)) { return $null }
+    try { return ((& $Executable version) | Select-Object -First 1).Trim() } catch { return $null }
 }
 
 function Test-SystemServices {
@@ -39,10 +71,10 @@ function Test-SystemServices {
     }
 }
 
-# Restart every spm process so it runs the binary that was just installed.
-function Update-SpmRuntime([string]$Executable) {
-    Write-Host "Restarting spm processes on the new version..."
-    & $Executable __upgrade-runtime
+# Move the processes of the changed runtimes onto the new binaries.
+function Update-SpmRuntime([string]$Executable, [string[]]$Components) {
+    Write-Host "Moving running spm processes onto the new runtime ($($Components -join ' '))..."
+    & $Executable __upgrade-runtime @Components
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "Some user services could not be restarted. Check 'spm list' and restart them with 'spm restart <name>'."
     }
@@ -50,7 +82,7 @@ function Update-SpmRuntime([string]$Executable) {
     if (-not (Test-SystemServices)) { return }
     $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
     if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        & $Executable --system __upgrade-runtime
+        & $Executable --system __upgrade-runtime @Components
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "Some system services could not be upgraded. Check 'spm --system list'."
         }
@@ -61,7 +93,7 @@ function Update-SpmRuntime([string]$Executable) {
     New-Item -ItemType File -Path $report | Out-Null
     try {
         try {
-            $process = Start-Process -FilePath $Executable -ArgumentList @("--system", "__upgrade-runtime", "--report", "`"$report`"") `
+            $process = Start-Process -FilePath $Executable -ArgumentList (@("--system", "__upgrade-runtime") + $Components + @("--report", "`"$report`"")) `
                 -Verb RunAs -WindowStyle Hidden -Wait -PassThru
         } catch {
             Write-Warning "System services still run the previous spm version because elevation was declined. Run this installer again and approve the prompt."
@@ -119,7 +151,7 @@ if ($Uninstall) {
         }
     }
 
-    foreach ($path in @((Join-Path $InstallDir "spm.exe"), $completion)) {
+    foreach ($path in @((Join-Path $InstallDir "spm.exe"), $completion) + @($runtimes.Keys | ForEach-Object { Join-Path $InstallDir $_ })) {
         if (Test-Path -LiteralPath $path) {
             Remove-Item -Force -LiteralPath $path
             Write-Host "Removed $path"
@@ -180,26 +212,26 @@ try {
 
     $expanded = Join-Path $temporaryDir "expanded"
     Expand-Archive -LiteralPath $archivePath -DestinationPath $expanded
-    $executable = Join-Path $expanded "spm.exe"
-    if (-not (Test-Path -LiteralPath $executable)) { throw "Release archive does not contain spm.exe" }
+    foreach ($file in @("spm.exe") + @($runtimes.Keys)) {
+        if (-not (Test-Path -LiteralPath (Join-Path $expanded $file))) { throw "Release archive does not contain $file" }
+    }
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Remove-StaleExecutables $InstallDir
     $target = Join-Path $InstallDir "spm.exe"
-    $previous = $null
-    if (Test-Path -LiteralPath $target) {
-        # Move the current binary aside instead of overwriting it, so the
-        # upgrade works while spm processes are running from it.
-        $previous = Join-Path $InstallDir "spm.exe.old"
-        if (Test-Path -LiteralPath $previous) {
-            $previous = Join-Path $InstallDir ("spm.exe.old-" + [guid]::NewGuid().ToString("N"))
+    $upgrading = Test-Path -LiteralPath $target
+    Install-Executable (Join-Path $expanded "spm.exe") $target
+    $changed = @()
+    foreach ($runtime in $runtimes.Keys) {
+        $source = Join-Path $expanded $runtime
+        $installed = Join-Path $InstallDir $runtime
+        $newVersion = Get-RuntimeVersion $source
+        if ($newVersion -and $newVersion -eq (Get-RuntimeVersion $installed)) {
+            Write-Host "$newVersion is already installed"
+            continue
         }
-        Move-Item -LiteralPath $target -Destination $previous
-    }
-    try {
-        Copy-Item -LiteralPath $executable -Destination $target
-    } catch {
-        if ($previous) { Move-Item -Force -LiteralPath $previous -Destination $target }
-        throw
+        Install-Executable $source $installed
+        $changed += $runtimes[$runtime]
+        Write-Host "Installed $newVersion"
     }
 
     if (-not $NoCompletion) {
@@ -223,14 +255,17 @@ try {
     }
     Write-Host "Installed spm $Version to $InstallDir\spm.exe"
     & (Join-Path $InstallDir "spm.exe") version
-    if ($previous) {
+    # A first install has nothing running. After an upgrade, only the
+    # runtimes whose version changed need their processes moved; that includes
+    # installs from before the split, whose services still run spm.exe.
+    if ($upgrading -and $changed.Count -gt 0) {
         if ($NoRestart) {
-            Write-Host "Skipped restarting spm processes (-NoRestart); they keep the previous version until restarted."
+            Write-Host "Skipped moving spm processes onto the new runtime (-NoRestart); they keep the previous version until restarted."
         } else {
-            Update-SpmRuntime $target
+            Update-SpmRuntime $target $changed
         }
-        Remove-StaleExecutables $InstallDir
     }
+    Remove-StaleExecutables $InstallDir
 } finally {
     if (Test-Path -LiteralPath $temporaryDir) {
         Remove-Item -Recurse -Force -LiteralPath $temporaryDir

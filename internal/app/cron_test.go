@@ -3,6 +3,8 @@ package app
 import (
 	"strings"
 	"testing"
+
+	"github.com/eyvant/spm/internal/runtime/scheduler"
 )
 
 func TestCronToOnCalendar(t *testing.T) {
@@ -75,6 +77,6 @@ func FuzzParseCronExpression(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, expression string) {
 		// Arbitrary user input must be rejected cleanly rather than panicking.
-		_, _ = parseCronExpression(expression)
+		_, _ = scheduler.ParseCron(expression)
 	})
 }

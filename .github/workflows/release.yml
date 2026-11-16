@@ -169,8 +169,11 @@ jobs:
           go build -buildvcs=false -trimpath \
             -ldflags="-s -w -X github.com/eyvant/spm/internal/app.version=${version} -X github.com/eyvant/spm/internal/app.commit=${GITHUB_SHA}" \
             -o build/spm.exe ./cmd/spm
+          # The runtimes carry their own Version; installers replace them,
+          # and restart what runs them, only when it changes.
+          go build -buildvcs=false -trimpath -ldflags="-s -w"             -o build/ ./cmd/spm-supervisor ./cmd/spm-scheduler
           cp LICENSE build/LICENSE
-          (cd build && zip -9 "../$archive" spm.exe LICENSE)
+          (cd build && zip -9 "../$archive" spm.exe spm-supervisor.exe spm-scheduler.exe LICENSE)
 
       - name: Upload archive
         uses: actions/upload-artifact@v7
@@ -216,8 +219,10 @@ jobs:
           go build -buildvcs=false -trimpath \
             -ldflags="-s -w -X github.com/eyvant/spm/internal/app.version=${version} -X github.com/eyvant/spm/internal/app.commit=${GITHUB_SHA}" \
             -o build/spm ./cmd/spm
+          # macOS needs only the scheduler runtime; launchd supervises services.
+          go build -buildvcs=false -trimpath -ldflags="-s -w"             -o build/spm-scheduler ./cmd/spm-scheduler
           cp LICENSE build/LICENSE
-          tar -C build -czf "$archive" spm LICENSE
+          tar -C build -czf "$archive" spm spm-scheduler LICENSE
 
       - name: Upload archive
         uses: actions/upload-artifact@v7

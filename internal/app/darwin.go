@@ -17,6 +17,9 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/eyvant/spm/internal/runtime/common"
+	"github.com/eyvant/spm/internal/runtime/scheduler"
 )
 
 const darwinConfigVersion = 1
@@ -64,9 +67,9 @@ func runDarwin(args []string, stdout, stderr io.Writer, system bool) error {
 		}
 		domain := args[4]
 		root := filepath.Clean(args[2])
-		log, closeLog := openPortableSchedulerLog(root, stderr)
+		log, closeLog := scheduler.OpenDaemonLog(root, stderr)
 		defer closeLog()
-		return runPortableScheduler(context.Background(), root, func(name string) error {
+		return scheduler.RunDaemon(context.Background(), root, func(name string) error {
 			command := darwinExecCommand("launchctl", "kickstart", domain+"/com.eyvant.spm."+name)
 			if output, err := command.CombinedOutput(); err != nil {
 				return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
@@ -213,7 +216,11 @@ func (b *darwinBackend) run(args []string) error {
 	case "native":
 		return b.native(args[1:])
 	case "__upgrade-runtime":
-		return b.upgradeRuntime()
+		components, err := parseUpgradeComponents(args[1:])
+		if err != nil {
+			return err
+		}
+		return b.upgradeRuntime(components)
 	case "doctor":
 		if len(args) != 1 {
 			return errors.New("doctor does not accept arguments")
@@ -754,13 +761,13 @@ func (b *darwinBackend) status(name string) error {
 		return fmt.Errorf("service %q is not managed by spm", name)
 	}
 	if config.Mode == "schedule" {
-		state := readPortableScheduleState(filepath.Join(b.scheduleStateDir(name), "schedule-state.json"))
+		state := scheduler.ReadState(filepath.Join(b.scheduleStateDir(name), "schedule-state.json"))
 		status := "disabled"
 		if config.Enabled {
 			status = "waiting"
 		}
 		w := tabwriter.NewWriter(b.stdout, 0, 4, 2, ' ', 0)
-		for _, row := range [][2]string{{"status", status}, {"name", name}, {"scope", map[bool]string{true: "system", false: "user"}[b.system]}, {"enabled", strconv.FormatBool(config.Enabled)}, {"schedule", valueOr(config.Schedule, "-")}, {"interval", valueOr(config.TimerInterval, "-")}, {"on boot", valueOr(config.TimerOnBoot, "-")}, {"timezone", valueOr(config.Timezone, "local")}, {"last scheduled", formatScheduleTime(state.LastScheduledAt)}, {"last finished", formatScheduleTime(state.LastFinishedAt)}, {"last exit code", scheduleExitCode(state.LastExitCode)}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"log", b.logPath(name)}} {
+		for _, row := range [][2]string{{"status", status}, {"name", name}, {"scope", map[bool]string{true: "system", false: "user"}[b.system]}, {"enabled", strconv.FormatBool(config.Enabled)}, {"schedule", valueOr(config.Schedule, "-")}, {"interval", valueOr(config.TimerInterval, "-")}, {"on boot", valueOr(config.TimerOnBoot, "-")}, {"timezone", valueOr(config.Timezone, "local")}, {"last scheduled", scheduler.FormatTime(state.LastScheduledAt)}, {"last finished", scheduler.FormatTime(state.LastFinishedAt)}, {"last exit code", scheduler.FormatExitCode(state.LastExitCode)}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"log", b.logPath(name)}} {
 			fmt.Fprintf(w, "%s\t%s\n", row[0], row[1])
 		}
 		return w.Flush()
@@ -820,7 +827,7 @@ func (b *darwinBackend) logs(args []string) error {
 		time.Sleep(500 * time.Millisecond)
 		for _, name := range names {
 			path := b.logPath(name)
-			info, offset, readErr := readRotatingLogUpdates(b.stdout, path, identities[name], offsets[name], options.grep)
+			info, offset, readErr := common.ReadRotatingLogUpdates(b.stdout, path, identities[name], offsets[name], options.grep)
 			if readErr == nil {
 				identities[name], offsets[name] = info, offset
 			}
@@ -829,7 +836,7 @@ func (b *darwinBackend) logs(args []string) error {
 }
 
 func printFileTail(w io.Writer, path string, count int, grep string) error {
-	return printRotatedLogTail(w, path, count, grep)
+	return common.PrintRotatedLogTail(w, path, count, grep)
 }
 
 func (b *darwinBackend) selectNames(selectors []string) ([]string, error) {
@@ -1007,8 +1014,8 @@ func (b *darwinBackend) prepareDeclaration(service serviceDeclaration) (darwinSe
 		config.Mode, config.Restart = "schedule", "no"
 		config.Schedule, config.Timezone, config.TimerOnBoot = service.Schedule, timezone, service.TimerOnBoot
 		config.TimerInterval, config.TimerRandomDelay, config.Persistent = service.TimerInterval, service.TimerRandomDelay, service.Persistent
-		record := portableScheduleRecord{Version: 1, Name: config.Name, Command: config.Command, Cwd: config.Cwd, Schedule: config.Schedule, Timezone: config.Timezone, TimerOnBoot: config.TimerOnBoot, TimerInterval: config.TimerInterval, TimerRandomDelay: config.TimerRandomDelay, Persistent: config.Persistent, CreatedAt: time.Now()}
-		if err := validatePortableSchedule(record); err != nil {
+		record := scheduler.Record{Version: 1, Name: config.Name, Command: config.Command, Cwd: config.Cwd, Schedule: config.Schedule, Timezone: config.Timezone, TimerOnBoot: config.TimerOnBoot, TimerInterval: config.TimerInterval, TimerRandomDelay: config.TimerRandomDelay, Persistent: config.Persistent, CreatedAt: time.Now()}
+		if err := scheduler.Validate(record); err != nil {
 			return darwinServiceConfig{}, err
 		}
 	}

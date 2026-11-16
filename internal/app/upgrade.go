@@ -8,22 +8,69 @@ import (
 	"runtime"
 )
 
-// runUpgradeRuntime moves every long-running process that executes the spm
-// binary itself onto the binary that is installed now. Installers call it
-// right after they replace the executable, so an upgrade never leaves the old
-// version running in the background.
+// upgradeComponents selects which runtimes an upgrade moved to a new version.
+type upgradeComponents struct {
+	supervisor bool // spm-supervisor: restart supervised services
+	scheduler  bool // spm-scheduler: rewrite job launchers, restart the daemon
+}
+
+func (c upgradeComponents) flags() []string {
+	var flags []string
+	if c.supervisor {
+		flags = append(flags, "--supervisor")
+	}
+	if c.scheduler {
+		flags = append(flags, "--scheduler")
+	}
+	return flags
+}
+
+func parseUpgradeComponents(args []string) (upgradeComponents, error) {
+	var components upgradeComponents
+	for _, arg := range args {
+		switch arg {
+		case "--supervisor":
+			components.supervisor = true
+		case "--scheduler":
+			components.scheduler = true
+		default:
+			return components, fmt.Errorf("unknown upgrade component %q", arg)
+		}
+	}
+	if !components.supervisor && !components.scheduler {
+		components = upgradeComponents{supervisor: true, scheduler: true}
+	}
+	return components, nil
+}
+
+// runUpgradeRuntime moves running processes onto newly installed runtimes.
+// Installers call it after replacing spm-supervisor or spm-scheduler, naming
+// the runtimes whose version changed:
+//
+//	spm [--system] __upgrade-runtime [--supervisor] [--scheduler] [--report FILE]
+//
+// With neither component named, both are refreshed. Upgrading only the spm
+// CLI needs no call at all: no background process runs the CLI.
 //
 // Linux has nothing to restart: systemd runs service commands directly and
-// spm only appears in short-lived health-check units, which pick up the new
-// binary on their next run.
+// schedules jobs with timers.
 func runUpgradeRuntime(args []string, stdout, stderr io.Writer, system bool) (err error) {
 	report := ""
-	switch {
-	case len(args) == 0:
-	case len(args) == 2 && args[0] == "--report" && args[1] != "":
-		report = args[1]
-	default:
-		return errors.New("usage: spm [--system] __upgrade-runtime [--report FILE]")
+	var rest []string
+	for index := 0; index < len(args); index++ {
+		if args[index] == "--report" {
+			if index+1 >= len(args) || args[index+1] == "" {
+				return errors.New("usage: spm [--system] __upgrade-runtime [--supervisor] [--scheduler] [--report FILE]")
+			}
+			report = args[index+1]
+			index++
+			continue
+		}
+		rest = append(rest, args[index])
+	}
+	components, err := parseUpgradeComponents(rest)
+	if err != nil {
+		return err
 	}
 	if report != "" {
 		// An elevated child has no console the installer can read, so it
@@ -40,11 +87,12 @@ func runUpgradeRuntime(args []string, stdout, stderr io.Writer, system bool) (er
 		}()
 		stdout, stderr = file, file
 	}
+	command := append([]string{"__upgrade-runtime"}, components.flags()...)
 	switch runtime.GOOS {
 	case "windows":
-		return runWindows([]string{"__upgrade-runtime"}, stdout, stderr, system)
+		return runWindows(command, stdout, stderr, system)
 	case "darwin":
-		return runDarwin([]string{"__upgrade-runtime"}, stdout, stderr, system)
+		return runDarwin(command, stdout, stderr, system)
 	default:
 		return nil
 	}

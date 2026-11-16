@@ -1,10 +1,10 @@
 //go:build !windows
 
-package app
+package common
 
 import "syscall"
 
-func portableProcessAlive(pid int) bool {
+func ProcessAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err == nil || err == syscall.EPERM
 }

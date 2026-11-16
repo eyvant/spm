@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/eyvant/spm/internal/runtime/scheduler"
 )
 
 type scheduleOptions struct {
@@ -44,7 +46,7 @@ func validatePersistedSchedule(config persistedStartConfig) error {
 		return errors.New("timezone requires a cron schedule")
 	}
 	if config.Timezone != "" {
-		if _, err := loadScheduleLocation(config.Timezone); err != nil {
+		if _, err := scheduler.LoadLocation(config.Timezone); err != nil {
 			return err
 		}
 	}
@@ -59,7 +61,7 @@ func validatePersistedSchedule(config persistedStartConfig) error {
 			return fmt.Errorf("invalid %s duration %q", field, value)
 		}
 		if value != "" {
-			_, err := parsePortableDuration(value)
+			_, err := scheduler.ParseDuration(value)
 			if err != nil {
 				return fmt.Errorf("invalid portable %s duration %q", field, value)
 			}
@@ -158,7 +160,7 @@ func parseSchedule(args []string) (scheduleOptions, error) {
 			return options, fmt.Errorf("invalid %s duration %q", flag, value)
 		}
 		if value != "" {
-			duration, err := parsePortableDuration(value)
+			duration, err := scheduler.ParseDuration(value)
 			if err != nil {
 				return options, fmt.Errorf("invalid portable %s duration %q", flag, value)
 			}
@@ -184,7 +186,7 @@ func parseSchedule(args []string) (scheduleOptions, error) {
 		return options, errors.New("--timezone requires --cron")
 	}
 	if start.timezone != "" {
-		if _, err := loadScheduleLocation(start.timezone); err != nil {
+		if _, err := scheduler.LoadLocation(start.timezone); err != nil {
 			return options, err
 		}
 	}

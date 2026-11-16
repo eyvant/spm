@@ -150,6 +150,7 @@ if [ "$uninstall" = true ]; then
 
   removed=false
   remove_installed_file "${install_dir}/spm"
+  remove_installed_file "${install_dir}/spm-scheduler"
   remove_installed_file "${XDG_DATA_HOME:-${HOME}/.local/share}/bash-completion/completions/spm.bash"
   remove_installed_file "${HOME}/.zfunc/_spm"
   remove_installed_file "${XDG_CONFIG_HOME:-${HOME}/.config}/fish/completions/spm.fish"
@@ -242,6 +243,16 @@ fi
 tar -xzf "${temporary_dir}/${archive}" -C "$temporary_dir"
 [ -f "${temporary_dir}/spm" ] || fail "release archive does not contain spm"
 
+# macOS also ships spm-scheduler, the runtime behind scheduled jobs. It
+# carries its own version and is replaced only when that changes, so
+# upgrading the CLI alone never restarts the scheduler. Linux needs no
+# runtime: systemd runs services and timers itself.
+is_darwin=false
+if [ "$(uname -s)" = Darwin ]; then
+  is_darwin=true
+  [ -f "${temporary_dir}/spm-scheduler" ] || fail "release archive does not contain spm-scheduler"
+fi
+
 mkdir -p "$install_dir"
 upgrading=false
 if [ -e "${install_dir}/spm" ]; then
@@ -252,23 +263,39 @@ install -m 0755 "${temporary_dir}/spm" "${install_dir}/spm"
 printf 'Installed spm %s to %s/spm\n' "$version" "$install_dir"
 "${install_dir}/spm" version
 
-# On macOS the scheduler daemon runs spm itself and keeps the previous binary
-# in memory until it restarts. Linux has no long-running spm process: systemd
-# runs service commands directly.
-if [ "$upgrading" = true ] && [ "$(uname -s)" = Darwin ]; then
+scheduler_changed=false
+if [ "$is_darwin" = true ]; then
+  new_scheduler=$("${temporary_dir}/spm-scheduler" version 2>/dev/null || true)
+  installed_scheduler=
+  if [ -x "${install_dir}/spm-scheduler" ]; then
+    installed_scheduler=$("${install_dir}/spm-scheduler" version 2>/dev/null || true)
+  fi
+  if [ -n "$new_scheduler" ] && [ "$new_scheduler" = "$installed_scheduler" ]; then
+    printf '%s is already installed\n' "$new_scheduler"
+  else
+    install -m 0755 "${temporary_dir}/spm-scheduler" "${install_dir}/spm-scheduler"
+    printf 'Installed %s\n' "$new_scheduler"
+    scheduler_changed=true
+  fi
+fi
+
+# A replaced spm-scheduler binary is used by the next job run, but the
+# scheduler daemon keeps the previous one in memory until it restarts. Installs
+# from before spm-scheduler existed also have job plists that still run spm.
+if [ "$upgrading" = true ] && [ "$scheduler_changed" = true ]; then
   if [ "$restart" != true ]; then
     printf 'Skipped restarting the spm scheduler (--no-restart); it keeps the previous version until restarted.\n'
   else
-    if ! "${install_dir}/spm" __upgrade-runtime; then
+    if ! "${install_dir}/spm" __upgrade-runtime --scheduler; then
       printf 'spm installer: warning: could not restart the user spm scheduler; run the installer again.\n' >&2
     fi
     if directory_has_entries "/Library/Application Support/spm/services"; then
       if [ "$(id -u)" = 0 ]; then
-        "${install_dir}/spm" --system __upgrade-runtime ||
+        "${install_dir}/spm" --system __upgrade-runtime --scheduler ||
           printf 'spm installer: warning: could not restart the system spm scheduler.\n' >&2
       else
         printf 'Restarting the system spm scheduler requires administrator rights.\n'
-        if ! sudo "${install_dir}/spm" --system __upgrade-runtime; then
+        if ! sudo "${install_dir}/spm" --system __upgrade-runtime --scheduler; then
           printf 'spm installer: warning: the system spm scheduler still runs the previous version; run the installer again and enter your password.\n' >&2
         fi
       fi

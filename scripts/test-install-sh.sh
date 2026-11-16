@@ -58,12 +58,25 @@ cat > "${fixture_dir}/payload/spm" <<'EOF'
 case "${1:-}" in
   version) printf 'spm test-version\n' ;;
   completion) printf '# test completion for %s\n' "${2:-unknown}" ;;
-  __upgrade-runtime) printf 'upgrade-runtime\n' >> "$SPM_TEST_UPGRADE_MARKER" ;;
+  __upgrade-runtime) printf '%s\n' "$*" >> "$SPM_TEST_UPGRADE_MARKER" ;;
   *) exit 2 ;;
 esac
 EOF
 chmod 0755 "${fixture_dir}/payload/spm"
-tar -czf "${fixture_dir}/${archive}" -C "${fixture_dir}/payload" spm
+payload_files=spm
+if [ "$platform" = macos ]; then
+  cat > "${fixture_dir}/payload/spm-scheduler" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  version) printf 'spm-scheduler 1\n' ;;
+  *) exit 2 ;;
+esac
+EOF
+  chmod 0755 "${fixture_dir}/payload/spm-scheduler"
+  payload_files="spm spm-scheduler"
+fi
+# shellcheck disable=SC2086
+tar -czf "${fixture_dir}/${archive}" -C "${fixture_dir}/payload" $payload_files
 
 if command -v sha256sum >/dev/null 2>&1; then
   archive_checksum=$(sha256sum "${fixture_dir}/${archive}" | awk '{ print $1 }')
@@ -114,18 +127,27 @@ grep -q "test completion for bash" "${data_home}/bash-completion/completions/spm
 upgrade_marker="${temporary_dir}/upgrade-runtime-calls"
 export SPM_TEST_UPGRADE_MARKER=$upgrade_marker
 [ ! -e "$upgrade_marker" ] || fail "a fresh install restarted spm processes"
-
-sh "$installer" --version 9.8.7 --completion zsh
-# Upgrading over an existing binary restarts the macOS scheduler; Linux has no
-# long-running spm process to restart.
 if [ "$platform" = macos ]; then
-  grep -qx "upgrade-runtime" "$upgrade_marker" || fail "upgrade did not restart the spm scheduler"
+  [ "$("${install_dir}/spm-scheduler" version)" = "spm-scheduler 1" ] || fail "spm-scheduler was not installed"
 else
-  [ ! -e "$upgrade_marker" ] || fail "Linux upgrade unexpectedly ran __upgrade-runtime"
+  [ ! -e "${install_dir}/spm-scheduler" ] || fail "Linux install added spm-scheduler"
 fi
-rm -f "$upgrade_marker"
-sh "$installer" --version 9.8.7 --completion zsh --no-restart
-[ ! -e "$upgrade_marker" ] || fail "--no-restart still restarted spm processes"
+
+# Same scheduler version: upgrading the CLI restarts nothing.
+sh "$installer" --version 9.8.7 --completion zsh
+[ ! -e "$upgrade_marker" ] || fail "an unchanged scheduler was restarted"
+
+if [ "$platform" = macos ]; then
+  # An install from before spm-scheduler existed: the scheduler counts as
+  # changed, and scheduling moves onto it.
+  rm -f "${install_dir}/spm-scheduler"
+  sh "$installer" --version 9.8.7 --completion zsh
+  grep -qx "__upgrade-runtime --scheduler" "$upgrade_marker" || fail "upgrade did not restart the spm scheduler"
+  rm -f "$upgrade_marker" "${install_dir}/spm-scheduler"
+  sh "$installer" --version 9.8.7 --completion zsh --no-restart
+  [ ! -e "$upgrade_marker" ] || fail "--no-restart still restarted spm processes"
+  [ -x "${install_dir}/spm-scheduler" ] || fail "--no-restart did not install spm-scheduler"
+fi
 grep -q "test completion for zsh" "${test_home}/.zfunc/_spm" || fail "zsh completion was not installed"
 
 sh "$installer" --version "$release_version" --completion fish

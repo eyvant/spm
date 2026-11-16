@@ -1,4 +1,4 @@
-package app
+package common
 
 import (
 	"bufio"
@@ -11,11 +11,11 @@ import (
 )
 
 const (
-	defaultLogMaxBytes = int64(10 * 1024 * 1024)
-	defaultLogBackups  = 5
+	DefaultLogMaxBytes = int64(10 * 1024 * 1024)
+	DefaultLogBackups  = 5
 )
 
-type rotatingLog struct {
+type RotatingLog struct {
 	mu      sync.Mutex
 	path    string
 	file    *os.File
@@ -24,14 +24,14 @@ type rotatingLog struct {
 	backups int
 }
 
-func openRotatingLog(path string, maximum int64, backups int) (*rotatingLog, error) {
+func OpenRotatingLog(path string, maximum int64, backups int) (*RotatingLog, error) {
 	if maximum <= 0 || backups < 0 {
 		return nil, fmt.Errorf("invalid log rotation limits")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	log := &rotatingLog{path: path, maximum: maximum, backups: backups}
+	log := &RotatingLog{path: path, maximum: maximum, backups: backups}
 	if info, err := os.Stat(path); err == nil && info.Size() >= maximum {
 		if err := rotateLogFiles(path, backups); err != nil {
 			return nil, err
@@ -45,7 +45,7 @@ func openRotatingLog(path string, maximum int64, backups int) (*rotatingLog, err
 	return log, nil
 }
 
-func (log *rotatingLog) open() error {
+func (log *RotatingLog) open() error {
 	file, err := os.OpenFile(log.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -59,7 +59,7 @@ func (log *rotatingLog) open() error {
 	return nil
 }
 
-func (log *rotatingLog) Write(data []byte) (int, error) {
+func (log *RotatingLog) Write(data []byte) (int, error) {
 	log.mu.Lock()
 	defer log.mu.Unlock()
 	written := 0
@@ -87,7 +87,7 @@ func (log *rotatingLog) Write(data []byte) (int, error) {
 	return written, nil
 }
 
-func (log *rotatingLog) rotate() error {
+func (log *RotatingLog) rotate() error {
 	if err := log.file.Close(); err != nil {
 		return err
 	}
@@ -98,7 +98,7 @@ func (log *rotatingLog) rotate() error {
 	return log.open()
 }
 
-func (log *rotatingLog) Close() error {
+func (log *RotatingLog) Close() error {
 	log.mu.Lock()
 	defer log.mu.Unlock()
 	if log.file == nil {
@@ -133,9 +133,9 @@ func rotateLogFiles(path string, backups int) error {
 	return nil
 }
 
-func printRotatedLogTail(w io.Writer, path string, count int, grep string) error {
+func PrintRotatedLogTail(w io.Writer, path string, count int, grep string) error {
 	var data []byte
-	for index := defaultLogBackups; index >= 0; index-- {
+	for index := DefaultLogBackups; index >= 0; index-- {
 		candidate := path
 		if index > 0 {
 			candidate = fmt.Sprintf("%s.%d", path, index)
@@ -164,7 +164,7 @@ func printRotatedLogTail(w io.Writer, path string, count int, grep string) error
 	return nil
 }
 
-func readRotatingLogUpdates(w io.Writer, path string, previous os.FileInfo, offset int64, grep string) (os.FileInfo, int64, error) {
+func ReadRotatingLogUpdates(w io.Writer, path string, previous os.FileInfo, offset int64, grep string) (os.FileInfo, int64, error) {
 	current, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		return previous, offset, nil
@@ -174,7 +174,7 @@ func readRotatingLogUpdates(w io.Writer, path string, previous os.FileInfo, offs
 	}
 	rotatedBackup := ""
 	if previous != nil {
-		for index := 1; index <= defaultLogBackups; index++ {
+		for index := 1; index <= DefaultLogBackups; index++ {
 			backup := fmt.Sprintf("%s.%d", path, index)
 			info, statErr := os.Stat(backup)
 			if statErr == nil && sameLogFile(previous, info) {

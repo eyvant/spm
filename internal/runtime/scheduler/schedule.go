@@ -1,4 +1,4 @@
-package app
+package scheduler
 
 import (
 	"bufio"
@@ -15,11 +15,13 @@ import (
 	"strings"
 	"time"
 	_ "time/tzdata"
+
+	"github.com/eyvant/spm/internal/runtime/common"
 )
 
-const portableScheduleVersion = 1
+const RecordVersion = 1
 
-type portableScheduleRecord struct {
+type Record struct {
 	Version          int       `json:"version"`
 	Name             string    `json:"name"`
 	Command          []string  `json:"command"`
@@ -35,7 +37,7 @@ type portableScheduleRecord struct {
 	CreatedAt        time.Time `json:"created_at"`
 }
 
-type portableScheduleState struct {
+type State struct {
 	Version         int       `json:"version"`
 	IntervalAnchor  time.Time `json:"interval_anchor,omitempty"`
 	LastCheckedAt   time.Time `json:"last_checked_at,omitempty"`
@@ -46,19 +48,19 @@ type portableScheduleState struct {
 	LastExitCode    *int      `json:"last_exit_code,omitempty"`
 }
 
-type cronExpression struct {
-	second, minute, hour, day, month, weekday cronField
+type CronExpression struct {
+	second, minute, hour, day, month, weekday CronField
 	hasSeconds                                bool
 	dayWildcard, weekdayWildcard              bool
 }
 
-type cronField struct {
-	minimum int
-	values  []bool
+type CronField struct {
+	Minimum int
+	Values  []bool
 }
 
-func parseCronExpression(expression string) (cronExpression, error) {
-	var result cronExpression
+func ParseCron(expression string) (CronExpression, error) {
+	var result CronExpression
 	if strings.ContainsAny(expression, "\r\n") {
 		return result, errors.New("expression cannot contain a newline")
 	}
@@ -70,14 +72,14 @@ func parseCronExpression(expression string) (cronExpression, error) {
 	if len(fields) == 6 {
 		result.hasSeconds = true
 		offset = 1
-		field, err := parsePortableCronField(fields[0], 0, 59, false)
+		field, err := ParseCronField(fields[0], 0, 59, false)
 		if err != nil {
 			return result, fmt.Errorf("second: %w", err)
 		}
 		result.second = field
 	} else {
-		result.second = cronField{minimum: 0, values: make([]bool, 60)}
-		result.second.values[0] = true
+		result.second = CronField{Minimum: 0, Values: make([]bool, 60)}
+		result.second.Values[0] = true
 	}
 	definitions := []struct {
 		name       string
@@ -85,7 +87,7 @@ func parseCronExpression(expression string) (cronExpression, error) {
 		minimum    int
 		maximum    int
 		normalize7 bool
-		target     *cronField
+		target     *CronField
 	}{
 		{"minute", fields[offset], 0, 59, false, &result.minute},
 		{"hour", fields[offset+1], 0, 23, false, &result.hour},
@@ -94,7 +96,7 @@ func parseCronExpression(expression string) (cronExpression, error) {
 		{"day of week", fields[offset+4], 0, 7, true, &result.weekday},
 	}
 	for _, definition := range definitions {
-		field, err := parsePortableCronField(definition.raw, definition.minimum, definition.maximum, definition.normalize7)
+		field, err := ParseCronField(definition.raw, definition.minimum, definition.maximum, definition.normalize7)
 		if err != nil {
 			return result, fmt.Errorf("%s: %w", definition.name, err)
 		}
@@ -105,12 +107,12 @@ func parseCronExpression(expression string) (cronExpression, error) {
 	return result, nil
 }
 
-func parsePortableCronField(raw string, minimum, maximum int, normalizeSunday bool) (cronField, error) {
+func ParseCronField(raw string, minimum, maximum int, normalizeSunday bool) (CronField, error) {
 	fieldMaximum := maximum
 	if normalizeSunday {
 		fieldMaximum = 6
 	}
-	result := cronField{minimum: minimum, values: make([]bool, fieldMaximum-minimum+1)}
+	result := CronField{Minimum: minimum, Values: make([]bool, fieldMaximum-minimum+1)}
 	if raw == "" {
 		return result, errors.New("field is empty")
 	}
@@ -139,11 +141,11 @@ func parsePortableCronField(raw string, minimum, maximum int, normalizeSunday bo
 				return result, fmt.Errorf("invalid range %q", item)
 			}
 			var err error
-			start, err = parseCronNumber(bounds[0], minimum, maximum)
+			start, err = ParseCronNumber(bounds[0], minimum, maximum)
 			if err != nil {
 				return result, err
 			}
-			end, err = parseCronNumber(bounds[1], minimum, maximum)
+			end, err = ParseCronNumber(bounds[1], minimum, maximum)
 			if err != nil {
 				return result, err
 			}
@@ -154,7 +156,7 @@ func parsePortableCronField(raw string, minimum, maximum int, normalizeSunday bo
 			if hasStep {
 				return result, fmt.Errorf("step %q requires * or a range", item)
 			}
-			value, err := parseCronNumber(base, minimum, maximum)
+			value, err := ParseCronNumber(base, minimum, maximum)
 			if err != nil {
 				return result, err
 			}
@@ -163,22 +165,22 @@ func parsePortableCronField(raw string, minimum, maximum int, normalizeSunday bo
 		for value := start; value <= end; value += step {
 			if normalizeSunday && value == 7 {
 				value = 0
-				result.values[value-result.minimum] = true
+				result.Values[value-result.Minimum] = true
 				value = 7
 				continue
 			}
-			result.values[value-result.minimum] = true
+			result.Values[value-result.Minimum] = true
 		}
 	}
 	return result, nil
 }
 
-func (field cronField) matches(value int) bool {
-	index := value - field.minimum
-	return index >= 0 && index < len(field.values) && field.values[index]
+func (field CronField) matches(value int) bool {
+	index := value - field.Minimum
+	return index >= 0 && index < len(field.Values) && field.Values[index]
 }
 
-func (expression cronExpression) matches(value time.Time) bool {
+func (expression CronExpression) matches(value time.Time) bool {
 	if !expression.second.matches(value.Second()) || !expression.minute.matches(value.Minute()) || !expression.hour.matches(value.Hour()) || !expression.month.matches(int(value.Month())) {
 		return false
 	}
@@ -196,14 +198,14 @@ func (expression cronExpression) matches(value time.Time) bool {
 	}
 }
 
-func (expression cronExpression) resolution() time.Duration {
+func (expression CronExpression) resolution() time.Duration {
 	if expression.hasSeconds {
 		return time.Second
 	}
 	return time.Minute
 }
 
-func previousCronOccurrence(expression cronExpression, now, notBefore time.Time, location *time.Location) (time.Time, bool) {
+func PreviousCronOccurrence(expression CronExpression, now, notBefore time.Time, location *time.Location) (time.Time, bool) {
 	localNow := now.In(location).Truncate(expression.resolution())
 	localStart := notBefore.In(location)
 	for day := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 12, 0, 0, 0, location); !day.Before(time.Date(localStart.Year(), localStart.Month(), localStart.Day(), 12, 0, 0, 0, location)); day = day.AddDate(0, 0, -1) {
@@ -251,7 +253,7 @@ func previousCronOccurrence(expression cronExpression, now, notBefore time.Time,
 	return time.Time{}, false
 }
 
-func nextCronOccurrence(expression cronExpression, after time.Time, location *time.Location) (time.Time, bool) {
+func NextCronOccurrence(expression CronExpression, after time.Time, location *time.Location) (time.Time, bool) {
 	localAfter := after.In(location)
 	lastDay := localAfter.AddDate(5, 0, 1)
 	for day := time.Date(localAfter.Year(), localAfter.Month(), localAfter.Day(), 12, 0, 0, 0, location); day.Before(lastDay); day = day.AddDate(0, 0, 1) {
@@ -299,7 +301,7 @@ func nextCronOccurrence(expression cronExpression, after time.Time, location *ti
 	return time.Time{}, false
 }
 
-func loadScheduleLocation(name string) (*time.Location, error) {
+func LoadLocation(name string) (*time.Location, error) {
 	if name == "" {
 		return time.Local, nil
 	}
@@ -310,7 +312,7 @@ func loadScheduleLocation(name string) (*time.Location, error) {
 	return location, nil
 }
 
-func parsePortableDuration(value string) (time.Duration, error) {
+func ParseDuration(value string) (time.Duration, error) {
 	if duration, err := time.ParseDuration(value); err == nil && duration > 0 {
 		return duration, nil
 	}
@@ -363,18 +365,18 @@ func parsePortableDuration(value string) (time.Duration, error) {
 	return total, nil
 }
 
-func validatePortableSchedule(record portableScheduleRecord) error {
-	if record.Version != portableScheduleVersion || record.Name == "" || len(record.Command) == 0 {
+func Validate(record Record) error {
+	if record.Version != RecordVersion || record.Name == "" || len(record.Command) == 0 {
 		return errors.New("invalid scheduled task record")
 	}
 	if record.Schedule == "" && record.TimerOnBoot == "" && record.TimerInterval == "" {
 		return errors.New("schedule requires a cron, boot, or interval trigger")
 	}
 	if record.Schedule != "" {
-		if _, err := parseCronExpression(record.Schedule); err != nil {
+		if _, err := ParseCron(record.Schedule); err != nil {
 			return fmt.Errorf("invalid schedule: %w", err)
 		}
-		if _, err := loadScheduleLocation(record.Timezone); err != nil {
+		if _, err := LoadLocation(record.Timezone); err != nil {
 			return err
 		}
 	} else if record.Timezone != "" {
@@ -382,7 +384,7 @@ func validatePortableSchedule(record portableScheduleRecord) error {
 	}
 	for name, value := range map[string]string{"timer_on_boot": record.TimerOnBoot, "timer_interval": record.TimerInterval, "timer_randomized_delay": record.TimerRandomDelay} {
 		if value != "" {
-			duration, err := parsePortableDuration(value)
+			duration, err := ParseDuration(value)
 			if err != nil {
 				return fmt.Errorf("invalid %s: %w", name, err)
 			}
@@ -397,14 +399,14 @@ func validatePortableSchedule(record portableScheduleRecord) error {
 	return nil
 }
 
-func writePortableSchedule(path string, record portableScheduleRecord) error {
+func WriteRecord(path string, record Record) error {
 	if record.Version == 0 {
-		record.Version = portableScheduleVersion
+		record.Version = RecordVersion
 	}
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = time.Now().UTC()
 	}
-	if err := validatePortableSchedule(record); err != nil {
+	if err := Validate(record); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(record, "", "  ")
@@ -414,11 +416,11 @@ func writePortableSchedule(path string, record portableScheduleRecord) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return writeFileAtomic(path, append(data, '\n'), 0o600)
+	return common.WriteFileAtomic(path, append(data, '\n'), 0o600)
 }
 
-func preparePortableScheduleUpdate(path, stateDir string, record *portableScheduleRecord) error {
-	previous, err := readPortableSchedule(path)
+func PrepareUpdate(path, stateDir string, record *Record) error {
+	previous, err := ReadRecord(path)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -435,12 +437,12 @@ func preparePortableScheduleUpdate(path, stateDir string, record *portableSchedu
 	return nil
 }
 
-func samePortableSchedule(left, right portableScheduleRecord) bool {
+func samePortableSchedule(left, right Record) bool {
 	return left.Schedule == right.Schedule && left.Timezone == right.Timezone && left.TimerOnBoot == right.TimerOnBoot && left.TimerInterval == right.TimerInterval && left.TimerRandomDelay == right.TimerRandomDelay && left.Persistent == right.Persistent
 }
 
-func readPortableSchedule(path string) (portableScheduleRecord, error) {
-	var record portableScheduleRecord
+func ReadRecord(path string) (Record, error) {
+	var record Record
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return record, err
@@ -448,21 +450,21 @@ func readPortableSchedule(path string) (portableScheduleRecord, error) {
 	if err := json.Unmarshal(data, &record); err != nil {
 		return record, err
 	}
-	return record, validatePortableSchedule(record)
+	return record, Validate(record)
 }
 
-func readPortableScheduleState(path string) portableScheduleState {
-	state := portableScheduleState{Version: portableScheduleVersion}
+func ReadState(path string) State {
+	state := State{Version: RecordVersion}
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &state)
 	}
-	if state.Version != portableScheduleVersion {
-		state = portableScheduleState{Version: portableScheduleVersion}
+	if state.Version != RecordVersion {
+		state = State{Version: RecordVersion}
 	}
 	return state
 }
 
-func writePortableScheduleState(path string, state portableScheduleState) error {
+func WriteState(path string, state State) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
@@ -470,17 +472,17 @@ func writePortableScheduleState(path string, state portableScheduleState) error 
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return writeFileAtomic(path, append(data, '\n'), 0o600)
+	return common.WriteFileAtomic(path, append(data, '\n'), 0o600)
 }
 
-func latestDueOccurrence(record portableScheduleRecord, state portableScheduleState, now time.Time, activation string) (time.Time, bool, error) {
+func LatestDueOccurrence(record Record, state State, now time.Time, activation string) (time.Time, bool, error) {
 	var due time.Time
 	if record.Schedule != "" {
-		expression, err := parseCronExpression(record.Schedule)
+		expression, err := ParseCron(record.Schedule)
 		if err != nil {
 			return time.Time{}, false, err
 		}
-		location, err := loadScheduleLocation(record.Timezone)
+		location, err := LoadLocation(record.Timezone)
 		if err != nil {
 			return time.Time{}, false, err
 		}
@@ -501,13 +503,13 @@ func latestDueOccurrence(record portableScheduleRecord, state portableScheduleSt
 			if start.Before(minimum) {
 				start = minimum
 			}
-			if candidate, ok := previousCronOccurrence(expression, current, start, location); ok {
+			if candidate, ok := PreviousCronOccurrence(expression, current, start, location); ok {
 				due = candidate
 			}
 		}
 	}
 	if record.TimerInterval != "" {
-		interval, err := parsePortableDuration(record.TimerInterval)
+		interval, err := ParseDuration(record.TimerInterval)
 		if err != nil {
 			return time.Time{}, false, err
 		}
@@ -532,7 +534,7 @@ func latestDueOccurrence(record portableScheduleRecord, state portableScheduleSt
 	return due, true, nil
 }
 
-func runPortableSchedule(args []string, stdout, stderr io.Writer) error {
+func Run(args []string, stdout, stderr io.Writer) error {
 	var configPath, stateDir, logPath, activation string
 	force := false
 	for index := 0; index < len(args); index++ {
@@ -562,7 +564,7 @@ func runPortableSchedule(args []string, stdout, stderr io.Writer) error {
 	if !filepath.IsAbs(configPath) || !filepath.IsAbs(stateDir) {
 		return errors.New("scheduled runner requires absolute --config and --state-dir paths")
 	}
-	record, err := readPortableSchedule(configPath)
+	record, err := ReadRecord(configPath)
 	if err != nil {
 		return fmt.Errorf("read scheduled task: %w", err)
 	}
@@ -570,7 +572,7 @@ func runPortableSchedule(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	lockPath := filepath.Join(stateDir, "run.lock")
-	locked, err := acquirePortableScheduleLock(lockPath)
+	locked, err := AcquireLock(lockPath)
 	if err != nil {
 		return err
 	}
@@ -579,16 +581,16 @@ func runPortableSchedule(args []string, stdout, stderr io.Writer) error {
 	}
 	defer os.RemoveAll(lockPath)
 	statePath := filepath.Join(stateDir, "schedule-state.json")
-	state := readPortableScheduleState(statePath)
+	state := ReadState(statePath)
 	if activation == "boot" && record.TimerOnBoot != "" && !force {
-		delay, err := parsePortableDuration(record.TimerOnBoot)
+		delay, err := ParseDuration(record.TimerOnBoot)
 		if err != nil {
 			return err
 		}
 		time.Sleep(delay)
 	}
 	now := time.Now()
-	due, shouldRun, err := latestDueOccurrence(record, state, now, activation)
+	due, shouldRun, err := LatestDueOccurrence(record, state, now, activation)
 	if err != nil {
 		return err
 	}
@@ -596,12 +598,12 @@ func runPortableSchedule(args []string, stdout, stderr io.Writer) error {
 		state.LastCheckedAt = now
 	}
 	if !force && !shouldRun {
-		return writePortableScheduleState(statePath, state)
+		return WriteState(statePath, state)
 	}
 	if force {
 		due = now
 	} else if shouldRun {
-		key, keyErr := portableOccurrenceKey(record, due)
+		key, keyErr := OccurrenceKey(record, due)
 		if keyErr != nil {
 			return keyErr
 		}
@@ -612,10 +614,10 @@ func runPortableSchedule(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 	if !force && !shouldRun {
-		return writePortableScheduleState(statePath, state)
+		return WriteState(statePath, state)
 	}
 	if record.TimerRandomDelay != "" && !force {
-		maximum, err := parsePortableDuration(record.TimerRandomDelay)
+		maximum, err := ParseDuration(record.TimerRandomDelay)
 		if err != nil {
 			return err
 		}
@@ -630,7 +632,7 @@ func runPortableSchedule(args []string, stdout, stderr io.Writer) error {
 	if state.IntervalAnchor.IsZero() {
 		state.IntervalAnchor = record.CreatedAt
 	}
-	if err := writePortableScheduleState(statePath, state); err != nil {
+	if err := WriteState(statePath, state); err != nil {
 		return err
 	}
 	output, closeOutput, err := scheduledOutput(stdout, stderr, logPath)
@@ -653,13 +655,13 @@ func runPortableSchedule(args []string, stdout, stderr io.Writer) error {
 	}
 	state.LastFinishedAt = time.Now()
 	state.LastExitCode = &exitCode
-	if stateErr := writePortableScheduleState(statePath, state); stateErr != nil {
+	if stateErr := WriteState(statePath, state); stateErr != nil {
 		return errors.Join(err, stateErr)
 	}
 	return err
 }
 
-func acquirePortableScheduleLock(path string) (bool, error) {
+func AcquireLock(path string) (bool, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		if err := os.Mkdir(path, 0o700); err == nil {
 			_ = os.WriteFile(filepath.Join(path, "pid"), []byte(strconv.Itoa(os.Getpid())), 0o600)
@@ -669,7 +671,7 @@ func acquirePortableScheduleLock(path string) (bool, error) {
 		}
 		data, _ := os.ReadFile(filepath.Join(path, "pid"))
 		pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
-		if pid > 0 && portableProcessAlive(pid) {
+		if pid > 0 && common.ProcessAlive(pid) {
 			return false, nil
 		}
 		if err := os.RemoveAll(path); err != nil {
@@ -679,13 +681,13 @@ func acquirePortableScheduleLock(path string) (bool, error) {
 	return false, nil
 }
 
-func portableOccurrenceKey(record portableScheduleRecord, due time.Time) (string, error) {
+func OccurrenceKey(record Record, due time.Time) (string, error) {
 	if record.Schedule != "" {
-		location, err := loadScheduleLocation(record.Timezone)
+		location, err := LoadLocation(record.Timezone)
 		if err != nil {
 			return "", err
 		}
-		expression, err := parseCronExpression(record.Schedule)
+		expression, err := ParseCron(record.Schedule)
 		if err != nil {
 			return "", err
 		}
@@ -702,14 +704,14 @@ func scheduledOutput(stdout, stderr io.Writer, path string) (io.Writer, func(), 
 	if path == "" {
 		return io.MultiWriter(stdout, stderr), func() {}, nil
 	}
-	file, err := openRotatingLog(path, defaultLogMaxBytes, defaultLogBackups)
+	file, err := common.OpenRotatingLog(path, common.DefaultLogMaxBytes, common.DefaultLogBackups)
 	if err != nil {
 		return nil, func() {}, err
 	}
 	return file, func() { _ = file.Close() }, nil
 }
 
-func scheduledEnvironment(record portableScheduleRecord) []string {
+func scheduledEnvironment(record Record) []string {
 	environment := append([]string(nil), os.Environ()...)
 	if record.EnvFile != "" {
 		if file, err := os.Open(record.EnvFile); err == nil {
@@ -746,16 +748,25 @@ func setPortableEnv(environment []string, key, value string) []string {
 	return append(environment, prefix+value)
 }
 
-func formatScheduleTime(value time.Time) string {
+func FormatTime(value time.Time) string {
 	if value.IsZero() {
 		return "-"
 	}
 	return value.Format(time.RFC3339)
 }
 
-func scheduleExitCode(value *int) string {
+func FormatExitCode(value *int) string {
 	if value == nil {
 		return "-"
 	}
 	return strconv.Itoa(*value)
+}
+
+// ParseCronNumber parses one numeric cron value within [minimum, maximum].
+func ParseCronNumber(raw string, minimum, maximum int) (int, error) {
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < minimum || value > maximum {
+		return 0, fmt.Errorf("value %q must be between %d and %d", raw, minimum, maximum)
+	}
+	return value, nil
 }

@@ -2,8 +2,10 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"reflect"
@@ -40,6 +42,17 @@ func TestMain(m *testing.M) {
 	}
 	if err := os.WriteFile(filepath.Join(directory, name), content, 0o755); err != nil {
 		panic(err)
+	}
+	// Registrations point at spm-supervisor and spm-scheduler, which live
+	// next to spm when installed; build them for the tests.
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		runtimes := filepath.Join(directory, "runtime")
+		build := exec.Command("go", "build", "-o", runtimes+string(os.PathSeparator),
+			"github.com/eyvant/spm/cmd/spm-supervisor", "github.com/eyvant/spm/cmd/spm-scheduler")
+		if output, err := build.CombinedOutput(); err != nil {
+			panic(fmt.Sprintf("build runtimes: %v\n%s", err, output))
+		}
+		_ = os.Setenv("SPM_RUNTIME_DIR", runtimes)
 	}
 	oldPath := os.Getenv("PATH")
 	_ = os.Setenv("PATH", directory+string(os.PathListSeparator)+oldPath)

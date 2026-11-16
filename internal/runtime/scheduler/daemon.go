@@ -1,4 +1,4 @@
-package app
+package scheduler
 
 import (
 	"context"
@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/eyvant/spm/internal/runtime/common"
 )
 
-type portableSchedulerTask struct {
-	record    portableScheduleRecord
+type Task struct {
+	record    Record
 	statePath string
 }
 
@@ -21,15 +23,15 @@ type portableSchedulerConfig struct {
 	Mode    string `json:"mode"`
 }
 
-func openPortableSchedulerLog(root string, fallback io.Writer) (io.Writer, func()) {
-	file, err := openRotatingLog(filepath.Join(root, "scheduler.log"), defaultLogMaxBytes, defaultLogBackups)
+func OpenDaemonLog(root string, fallback io.Writer) (io.Writer, func()) {
+	file, err := common.OpenRotatingLog(filepath.Join(root, "scheduler.log"), common.DefaultLogMaxBytes, common.DefaultLogBackups)
 	if err != nil {
 		return fallback, func() {}
 	}
 	return file, func() { _ = file.Close() }
 }
 
-func discoverPortableSchedulerTasks(root string) ([]portableSchedulerTask, error) {
+func DiscoverTasks(root string) ([]Task, error) {
 	servicesDir := filepath.Join(root, "services")
 	entries, err := os.ReadDir(servicesDir)
 	if os.IsNotExist(err) {
@@ -38,7 +40,7 @@ func discoverPortableSchedulerTasks(root string) ([]portableSchedulerTask, error
 	if err != nil {
 		return nil, err
 	}
-	var tasks []portableSchedulerTask
+	var tasks []Task
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -53,35 +55,35 @@ func discoverPortableSchedulerTasks(root string) ([]portableSchedulerTask, error
 			continue
 		}
 		recordPath := filepath.Join(directory, "schedule.json")
-		record, err := readPortableSchedule(recordPath)
+		record, err := ReadRecord(recordPath)
 		if err != nil || record.Schedule == "" && record.TimerInterval == "" {
 			continue
 		}
 		stateDir := filepath.Join(directory, "schedule-state")
-		tasks = append(tasks, portableSchedulerTask{
+		tasks = append(tasks, Task{
 			record: record, statePath: filepath.Join(stateDir, "schedule-state.json"),
 		})
 	}
 	return tasks, nil
 }
 
-func nextPortableScheduleOccurrence(record portableScheduleRecord, state portableScheduleState, after time.Time) (time.Time, error) {
+func NextOccurrence(record Record, state State, after time.Time) (time.Time, error) {
 	var next time.Time
 	if record.Schedule != "" {
-		expression, err := parseCronExpression(record.Schedule)
+		expression, err := ParseCron(record.Schedule)
 		if err != nil {
 			return time.Time{}, err
 		}
-		location, err := loadScheduleLocation(record.Timezone)
+		location, err := LoadLocation(record.Timezone)
 		if err != nil {
 			return time.Time{}, err
 		}
-		if candidate, ok := nextCronOccurrence(expression, after, location); ok {
+		if candidate, ok := NextCronOccurrence(expression, after, location); ok {
 			next = candidate
 		}
 	}
 	if record.TimerInterval != "" {
-		interval, err := parsePortableDuration(record.TimerInterval)
+		interval, err := ParseDuration(record.TimerInterval)
 		if err != nil {
 			return time.Time{}, err
 		}
@@ -101,7 +103,7 @@ func nextPortableScheduleOccurrence(record portableScheduleRecord, state portabl
 	return next, nil
 }
 
-func runPortableScheduler(ctx context.Context, root string, trigger func(string) error, stderr io.Writer) error {
+func RunDaemon(ctx context.Context, root string, trigger func(string) error, stderr io.Writer) error {
 	if !filepath.IsAbs(root) {
 		return errors.New("scheduler requires an absolute root")
 	}
@@ -111,7 +113,7 @@ func runPortableScheduler(ctx context.Context, root string, trigger func(string)
 	}
 	lockPath := filepath.Join(stateDir, "run.lock")
 	for {
-		locked, err := acquirePortableScheduleLock(lockPath)
+		locked, err := AcquireLock(lockPath)
 		if err != nil {
 			return err
 		}
@@ -134,15 +136,15 @@ func runPortableScheduler(ctx context.Context, root string, trigger func(string)
 	defer os.RemoveAll(lockPath)
 	dispatched := map[string]time.Time{}
 	for {
-		tasks, err := discoverPortableSchedulerTasks(root)
+		tasks, err := DiscoverTasks(root)
 		if err != nil {
 			return err
 		}
 		now := time.Now()
 		var next time.Time
 		for _, task := range tasks {
-			state := readPortableScheduleState(task.statePath)
-			due, shouldRun, dueErr := latestDueOccurrence(task.record, state, now, "daemon")
+			state := ReadState(task.statePath)
+			due, shouldRun, dueErr := LatestDueOccurrence(task.record, state, now, "daemon")
 			if dueErr != nil {
 				fmt.Fprintf(stderr, "scheduler: %s: %v\n", task.record.Name, dueErr)
 				continue
@@ -167,7 +169,7 @@ func runPortableScheduler(ctx context.Context, root string, trigger func(string)
 			if lastDispatch.After(after) {
 				after = lastDispatch
 			}
-			candidate, nextErr := nextPortableScheduleOccurrence(task.record, state, after)
+			candidate, nextErr := NextOccurrence(task.record, state, after)
 			if nextErr != nil {
 				fmt.Fprintf(stderr, "scheduler: next %s: %v\n", task.record.Name, nextErr)
 				continue

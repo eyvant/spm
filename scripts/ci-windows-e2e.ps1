@@ -45,6 +45,10 @@ if ($system) {
     Copy-Item -LiteralPath (Join-Path $repo 'scripts\spm-test-service.ps1') -Destination $workload -Force
     $systemSpm = Join-Path $workloadDir 'spm-ci.exe'
     Copy-Item -LiteralPath $Spm -Destination $systemSpm -Force
+    # spm finds its runtimes next to itself.
+    foreach ($runtime in @('spm-supervisor.exe', 'spm-scheduler.exe')) {
+        Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $Spm) $runtime) -Destination (Join-Path $workloadDir $runtime) -Force
+    }
     $Spm = $systemSpm
     $scheduleMarker = Join-Path $workloadDir 'schedule-marker.txt'
 } else {
@@ -252,7 +256,7 @@ $accountLine
     }
 	$launcher = Join-Path $data "services\$scheduled\schedule-daemon.vbs"
 	$launcherText = Get-Content -LiteralPath $launcher -Raw
-	if ($launcherText -notmatch '__scheduled-run' -or $launcherText -notmatch '--activation.+daemon' -or $launcherText -notmatch ', 0, True') {
+	if ($launcherText -notmatch 'spm-scheduler.exe"" ""run""' -or $launcherText -notmatch '--activation.+daemon' -or $launcherText -notmatch ', 0, True') {
 		throw "Unexpected hidden schedule launcher: $launcherText"
 	}
     $schedulerSuffix = Get-SchedulerRootSuffix $data

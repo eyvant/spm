@@ -62,7 +62,9 @@ jobs:
         run: sh scripts/test-install-sh.sh
 
       - name: Build
-        run: go build -cover -covermode=atomic -buildvcs=false -o spm-ci ./cmd/spm
+        run: |
+          go build -cover -covermode=atomic -buildvcs=false -o spm-ci ./cmd/spm
+          go build -cover -covermode=atomic -buildvcs=false -o spm-scheduler ./cmd/spm-scheduler
 
       - name: Prepare E2E coverage directory
         run: |

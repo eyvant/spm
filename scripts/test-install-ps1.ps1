@@ -51,14 +51,22 @@ function Invoke-WebRequest {
 
 try {
     New-Item -ItemType Directory -Path $fixtureDir, $payloadDir | Out-Null
-    $fixtureExecutable = Join-Path $payloadDir "spm.exe"
+    $fixtureFiles = @("spm.exe", "spm-supervisor.exe", "spm-scheduler.exe")
     if ($Spm) {
-        Copy-Item -LiteralPath ([IO.Path]::GetFullPath($Spm)) -Destination $fixtureExecutable
+        # The runtimes are built next to spm.exe.
+        $spmDirectory = Split-Path -Parent ([IO.Path]::GetFullPath($Spm))
+        Copy-Item -LiteralPath ([IO.Path]::GetFullPath($Spm)) -Destination (Join-Path $payloadDir "spm.exe")
+        foreach ($file in $fixtureFiles[1..2]) { Copy-Item -LiteralPath (Join-Path $spmDirectory $file) -Destination $payloadDir }
     } else {
-        & go build -buildvcs=false -o $fixtureExecutable (Join-Path $repository "cmd\spm")
-        if ($LASTEXITCODE -ne 0) { throw "Failed to build the installer test fixture" }
+        Push-Location $repository
+        try {
+            & go build -buildvcs=false -o "$payloadDir\" ./cmd/spm ./cmd/spm-supervisor ./cmd/spm-scheduler
+            if ($LASTEXITCODE -ne 0) { throw "Failed to build the installer test fixture" }
+        } finally {
+            Pop-Location
+        }
     }
-    Compress-Archive -LiteralPath $fixtureExecutable -DestinationPath $archivePath
+    Compress-Archive -LiteralPath @($fixtureFiles | ForEach-Object { Join-Path $payloadDir $_ }) -DestinationPath $archivePath
     $checksum = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
     Set-Content -Encoding ASCII -LiteralPath $checksumsPath -Value "$checksum  $archive"
     $env:SPM_WINDOWS_DATA_DIR = $dataRoot
@@ -77,8 +85,11 @@ try {
     $installedUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
     Assert-True (@($installedUserPath -split ';') -contains $installDir) "Installer did not add the user PATH entry"
 
-    # Upgrade while spm processes run from the installed binary: the swap must
-    # succeed and every process must move onto the new binary.
+    $installedSupervisor = Join-Path $installDir "spm-supervisor.exe"
+    $installedScheduler = Join-Path $installDir "spm-scheduler.exe"
+    Assert-True ((Test-Path -LiteralPath $installedSupervisor) -and (Test-Path -LiteralPath $installedScheduler)) "Installer did not install the runtimes"
+
+    # Upgrade while services and the scheduler run from the installed runtimes.
     & $installedExecutable start --name upgrade-probe -- powershell.exe -NoProfile -Command "Start-Sleep 600"
     Assert-True ($LASTEXITCODE -eq 0) "Could not start the upgrade probe service"
     & $installedExecutable schedule --name upgrade-cron --cron "0 4 * * *" -- cmd.exe /c exit 0
@@ -92,6 +103,16 @@ try {
     Assert-True ($null -ne (Get-Process -Id $oldSupervisor -ErrorAction SilentlyContinue)) "Upgrade probe supervisor is not running"
     Assert-True ($null -ne (Get-Process -Id $oldDaemon -ErrorAction SilentlyContinue)) "Scheduler daemon is not running"
     try {
+        # Same runtime versions: only the CLI is replaced, nothing restarts.
+        & $installer -InstallDir $installDir -NoCompletion -NoPath
+        Assert-True ((Get-Content -Raw -LiteralPath $probeState | ConvertFrom-Json).supervisor_pid -eq $oldSupervisor) "A CLI-only upgrade restarted the service"
+        Assert-True ([int](Get-Content -LiteralPath $daemonPidFile) -eq $oldDaemon) "A CLI-only upgrade restarted the scheduler"
+
+        # Missing runtimes, as after an install from before they existed, count
+        # as changed: every process moves onto the new runtimes. The running
+        # binaries can be renamed but not deleted.
+        Move-Item -LiteralPath $installedSupervisor -Destination "$installedSupervisor.old-test"
+        Move-Item -LiteralPath $installedScheduler -Destination "$installedScheduler.old-test"
         & $installer -InstallDir $installDir -NoCompletion -NoPath
 
         $newSupervisor = (Get-Content -Raw -LiteralPath $probeState | ConvertFrom-Json).supervisor_pid
@@ -106,11 +127,11 @@ try {
         Assert-True ($null -eq (Get-Process -Id $oldDaemon -ErrorAction SilentlyContinue)) "Upgrade left the old scheduler daemon running"
         Assert-True ($newSupervisor -ne $oldSupervisor -and $null -ne (Get-Process -Id $newSupervisor -ErrorAction SilentlyContinue)) "Upgrade did not restart the service supervisor"
         Assert-True ($newDaemon -ne $oldDaemon -and $null -ne (Get-Process -Id $newDaemon -ErrorAction SilentlyContinue)) "Upgrade did not restart the scheduler daemon"
-        foreach ($processId in @($newSupervisor, $newDaemon)) {
-            $image = (Get-Process -Id $processId).Path
-            Assert-True ($image -ieq $installedExecutable) "Process $processId runs $image instead of the installed binary"
-        }
-        Assert-True (-not (Get-ChildItem -LiteralPath $installDir -Filter "spm.exe.old*")) "Upgrade left the previous binary behind"
+        $image = (Get-Process -Id $newSupervisor).Path
+        Assert-True ($image -ieq $installedSupervisor) "The service supervisor runs $image instead of the installed spm-supervisor"
+        $image = (Get-Process -Id $newDaemon).Path
+        Assert-True ($image -ieq $installedScheduler) "The scheduler daemon runs $image instead of the installed spm-scheduler"
+        Assert-True (-not (Get-ChildItem -LiteralPath $installDir -Filter "spm*.exe.old*")) "Upgrade left previous binaries behind"
     } finally {
         & $installedExecutable delete all --yes | Out-Null
     }

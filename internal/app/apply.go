@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/eyvant/spm/internal/runtime/scheduler"
 )
 
 type serviceDeclaration struct {
@@ -81,7 +83,7 @@ func validateTimerDeclaration(service serviceDeclaration) error {
 			return fmt.Errorf("invalid %s duration %q", field, value)
 		}
 		if value != "" {
-			duration, err := parsePortableDuration(value)
+			duration, err := scheduler.ParseDuration(value)
 			if err != nil {
 				return fmt.Errorf("invalid portable %s duration %q", field, value)
 			}
@@ -97,7 +99,7 @@ func validateTimerDeclaration(service serviceDeclaration) error {
 		if service.Schedule == "" {
 			return errors.New("timezone requires schedule")
 		}
-		if _, err := loadScheduleLocation(service.Timezone); err != nil {
+		if _, err := scheduler.LoadLocation(service.Timezone); err != nil {
 			return err
 		}
 	}

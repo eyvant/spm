@@ -73,28 +73,35 @@ curl -fsSL https://raw.githubusercontent.com/eyvant/spm/main/install.sh | \
 
 ### Upgrading
 
-Run the installer again. It replaces the binary while spm is running and then
-moves every running spm process onto the new version, so nothing keeps
-running the old code:
+Run the installer again; it works while services are running.
 
-- **Windows:** the scheduler is restarted, and running user services are
-  restarted once (each service's supervisor runs spm itself, so swapping it
-  restarts the service). When system services exist, the installer asks for
-  Administrator approval once, refreshes each service's supervisor copy, and
-  restarts the ones that were running.
-- **macOS:** the scheduler daemon is restarted (with `sudo` for system jobs).
-  Services are run by launchd directly and are not touched.
-- **Linux:** nothing needs restarting; systemd runs service commands directly.
+`spm` itself is only the command-line tool. Background work is done by two
+small runtimes installed next to it, each with its own version:
 
-A scheduled job that is running during the upgrade finishes normally; its
-next run uses the new version. Pass `-NoRestart` (Windows) or `--no-restart`
-(macOS) to keep processes on the previous version until you restart them
-yourself.
+| Runtime | Platforms | Runs |
+| --- | --- | --- |
+| `spm-supervisor` | Windows | every service (systemd and launchd supervise services elsewhere) |
+| `spm-scheduler` | Windows, macOS | the scheduler daemon and every scheduled-job run |
 
-Or install from source with Go 1.27 or later:
+The installer replaces a runtime only when its version changes, so most
+upgrades replace just the CLI and restart nothing. When a runtime does change:
+
+- **`spm-scheduler`:** the scheduler daemon is restarted. Services are not
+  touched, and a job that is running finishes normally; its next run uses the
+  new version.
+- **`spm-supervisor`:** each running service is restarted once, since its
+  supervisor owns the service process. For system services the installer asks
+  for Administrator approval once.
+
+On macOS, system jobs need `sudo`. Linux needs neither runtime. Pass
+`-NoRestart` (Windows) or `--no-restart` (macOS) to keep running processes on
+the previous runtime until you restart them yourself.
+
+Or install from source with Go 1.27 or later (the runtimes must sit next to
+`spm`, which `go install` does):
 
 ```bash
-go install github.com/eyvant/spm/cmd/spm@latest
+go install github.com/eyvant/spm/cmd/...@latest
 ```
 
 Verify the installation:

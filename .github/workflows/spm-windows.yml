@@ -57,7 +57,9 @@ jobs:
           cache-key: ${{ matrix.runner }}
 
       - name: Build
-        run: go build -cover -covermode atomic -buildvcs=false -o spm.exe ./cmd/spm
+        run: |
+          go build -cover -covermode atomic -buildvcs=false -o spm.exe ./cmd/spm
+          go build -cover -covermode atomic -buildvcs=false -o . ./cmd/spm-supervisor ./cmd/spm-scheduler
 
       - name: Prepare E2E coverage directory
         shell: pwsh

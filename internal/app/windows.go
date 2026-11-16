@@ -3,7 +3,6 @@
 package app
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,7 +17,10 @@ import (
 	"syscall"
 	"text/tabwriter"
 	"time"
-	"unsafe"
+
+	"github.com/eyvant/spm/internal/runtime/common"
+	"github.com/eyvant/spm/internal/runtime/scheduler"
+	"github.com/eyvant/spm/internal/runtime/supervisor"
 )
 
 // The Windows backend deliberately uses only operating-system facilities. A
@@ -26,49 +28,17 @@ import (
 // Startup folder handles user logon, while machine-wide services use the
 // Windows Service Control Manager and are visible in services.msc.
 
-const windowsStateVersion = 1
+// The service files and the supervisor live in internal/runtime/supervisor,
+// which spm-supervisor.exe is built from.
+const windowsStateVersion = supervisor.StateVersion
 
-type windowsServiceConfig struct {
-	Version          int      `json:"version"`
-	Name             string   `json:"name"`
-	Description      string   `json:"description"`
-	Cwd              string   `json:"cwd"`
-	Command          []string `json:"command"`
-	Env              []string `json:"env,omitempty"`
-	EnvFile          string   `json:"env_file,omitempty"`
-	Restart          string   `json:"restart"`
-	RestartSec       string   `json:"restart_sec"`
-	Enabled          bool     `json:"enabled"`
-	RunAs            string   `json:"run_as,omitempty"`
-	After            []string `json:"after,omitempty"`
-	Wants            []string `json:"wants,omitempty"`
-	Requires         []string `json:"requires,omitempty"`
-	Mode             string   `json:"mode,omitempty"`
-	Schedule         string   `json:"schedule,omitempty"`
-	Timezone         string   `json:"timezone,omitempty"`
-	TimerOnBoot      string   `json:"timer_on_boot,omitempty"`
-	TimerInterval    string   `json:"timer_interval,omitempty"`
-	TimerRandomDelay string   `json:"timer_randomized_delay,omitempty"`
-	Persistent       bool     `json:"persistent,omitempty"`
-}
+type (
+	windowsServiceConfig = supervisor.Config
+	windowsServiceState  = supervisor.State
+	windowsControl       = supervisor.Control
+)
 
-type windowsServiceState struct {
-	Version       int       `json:"version"`
-	Name          string    `json:"name"`
-	Status        string    `json:"status"`
-	SupervisorPID int       `json:"supervisor_pid,omitempty"`
-	PID           int       `json:"pid,omitempty"`
-	Restarts      int       `json:"restarts"`
-	StartedAt     time.Time `json:"started_at,omitempty"`
-	StoppedAt     time.Time `json:"stopped_at,omitempty"`
-	ExitCode      *int      `json:"exit_code,omitempty"`
-	Error         string    `json:"error,omitempty"`
-}
-
-type windowsControl struct {
-	Action      string `json:"action"`
-	RequestedAt int64  `json:"requested_at"`
-}
+func (b *windowsBackend) layout() supervisor.Layout { return supervisor.Layout{Root: b.root} }
 
 type windowsBackend struct {
 	stdout io.Writer
@@ -83,9 +53,9 @@ func runWindows(args []string, stdout, stderr io.Writer, system bool) error {
 			return errors.New("invalid Windows scheduler invocation")
 		}
 		root := filepath.Clean(args[2])
-		log, closeLog := openPortableSchedulerLog(root, stderr)
+		log, closeLog := scheduler.OpenDaemonLog(root, stderr)
 		defer closeLog()
-		return runPortableScheduler(context.Background(), root, triggerWindowsScheduledTask, log)
+		return scheduler.RunDaemon(context.Background(), root, triggerWindowsScheduledTask, log)
 	}
 	if len(args) > 0 && args[0] == "__windows-service" {
 		if len(args) != 4 || args[1] != "--root" || !filepath.IsAbs(args[2]) {
@@ -296,7 +266,11 @@ func (b *windowsBackend) run(args []string) error {
 	case "native":
 		return b.native(args[1:])
 	case "__upgrade-runtime":
-		return b.upgradeRuntime()
+		components, err := parseUpgradeComponents(args[1:])
+		if err != nil {
+			return err
+		}
+		return b.upgradeRuntime(components)
 	case "startup":
 		if len(args) != 1 {
 			return errors.New("startup does not accept arguments")
@@ -385,21 +359,6 @@ func (b *windowsBackend) names() ([]string, error) {
 	return names, nil
 }
 
-func (b *windowsBackend) readConfig(name string) (windowsServiceConfig, error) {
-	var config windowsServiceConfig
-	data, err := os.ReadFile(b.configPath(name))
-	if err != nil {
-		return config, err
-	}
-	if err := json.Unmarshal(data, &config); err != nil {
-		return config, err
-	}
-	if config.Version != windowsStateVersion || config.Name != name || len(config.Command) == 0 {
-		return config, fmt.Errorf("invalid Windows service configuration for %q", name)
-	}
-	return config, nil
-}
-
 func (b *windowsBackend) writeConfig(config windowsServiceConfig) error {
 	if err := b.ensureDirectories(); err != nil {
 		return err
@@ -413,40 +372,6 @@ func (b *windowsBackend) writeConfig(config windowsServiceConfig) error {
 	}
 	data = append(data, '\n')
 	return writeFileAtomic(b.configPath(config.Name), data, 0o600)
-}
-
-func (b *windowsBackend) readState(name string) windowsServiceState {
-	var state windowsServiceState
-	data, err := os.ReadFile(b.statePath(name))
-	if err == nil {
-		_ = json.Unmarshal(data, &state)
-	}
-	if state.Name == "" {
-		state.Name = name
-		state.Version = windowsStateVersion
-		state.Status = "stopped"
-	}
-	if state.PID > 0 && !windowsProcessAlive(state.PID) {
-		state.PID = 0
-		if state.Status == "running" || state.Status == "starting" {
-			state.Status = "stopped"
-		}
-	}
-	if state.SupervisorPID > 0 && !windowsProcessAlive(state.SupervisorPID) {
-		state.SupervisorPID = 0
-	}
-	return state
-}
-
-func (b *windowsBackend) writeState(state windowsServiceState) error {
-	if err := b.ensureDirectories(); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(b.statePath(state.Name), append(data, '\n'), 0o600)
 }
 
 func (b *windowsBackend) start(args []string) error {
@@ -654,8 +579,8 @@ func (b *windowsBackend) prepareDeclaration(service serviceDeclaration) (windows
 		config.Mode, config.Restart = "schedule", "no"
 		config.Schedule, config.Timezone, config.TimerOnBoot = service.Schedule, timezone, service.TimerOnBoot
 		config.TimerInterval, config.TimerRandomDelay, config.Persistent = service.TimerInterval, service.TimerRandomDelay, service.Persistent
-		record := portableScheduleRecord{Version: 1, Name: config.Name, Command: config.Command, Cwd: config.Cwd, Schedule: config.Schedule, Timezone: config.Timezone, TimerOnBoot: config.TimerOnBoot, TimerInterval: config.TimerInterval, TimerRandomDelay: config.TimerRandomDelay, Persistent: config.Persistent, CreatedAt: time.Now()}
-		if err := validatePortableSchedule(record); err != nil {
+		record := scheduler.Record{Version: 1, Name: config.Name, Command: config.Command, Cwd: config.Cwd, Schedule: config.Schedule, Timezone: config.Timezone, TimerOnBoot: config.TimerOnBoot, TimerInterval: config.TimerInterval, TimerRandomDelay: config.TimerRandomDelay, Persistent: config.Persistent, CreatedAt: time.Now()}
+		if err := scheduler.Validate(record); err != nil {
 			return windowsServiceConfig{}, err
 		}
 	}
@@ -750,10 +675,6 @@ func (b *windowsBackend) startManagedStack(name string, stack map[string]bool) e
 			return fmt.Errorf("service %q supervisor is already starting", name)
 		}
 	}
-	executable, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve spm executable: %w", err)
-	}
 	if err := b.ensureDirectories(); err != nil {
 		return err
 	}
@@ -761,7 +682,11 @@ func (b *windowsBackend) startManagedStack(name string, stack map[string]bool) e
 	if b.system {
 		return b.startSystemManaged(name)
 	}
-	cmd := exec.Command(executable, "__windows-supervise", "--root", b.root, name)
+	executable, err := runtimeExecutable(supervisorRuntime)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(executable, "supervise", "--root", b.root, name)
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x00000008 | 0x00000200, HideWindow: true}
 	null, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
@@ -824,170 +749,6 @@ func (b *windowsBackend) waitRunning(name string, timeout time.Duration) error {
 	return fmt.Errorf("timed out waiting for %s to run", name)
 }
 
-func (b *windowsBackend) supervise(name string) error {
-	config, err := b.readConfig(name)
-	if err != nil {
-		return fmt.Errorf("read supervisor config: %w", err)
-	}
-	if err := b.ensureDirectories(); err != nil {
-		return err
-	}
-	log, err := os.OpenFile(b.logPath(name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer log.Close()
-	state := windowsServiceState{Version: windowsStateVersion, Name: name, Status: "starting", SupervisorPID: os.Getpid()}
-	_ = b.writeState(state)
-	delay, err := time.ParseDuration(config.RestartSec)
-	if err != nil || delay < 0 {
-		delay = 3 * time.Second
-	}
-	for {
-		fmt.Fprintf(log, "[%s] spm: starting %s\r\n", time.Now().Format(time.RFC3339), strings.Join(config.Command, " "))
-		cmd := exec.Command(config.Command[0], config.Command[1:]...)
-		cmd.Dir = config.Cwd
-		cmd.Env = windowsEnvironment(config)
-		cmd.Stdout, cmd.Stderr = log, log
-		cmd.Stdin = nil
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		started := time.Now()
-		if err := cmd.Start(); err != nil {
-			state.Status, state.Error, state.PID, state.SupervisorPID = "failed", err.Error(), 0, 0
-			state.StoppedAt = time.Now()
-			fmt.Fprintf(log, "[%s] spm: start failed: %v\r\n", time.Now().Format(time.RFC3339), err)
-			_ = log.Close()
-			_ = b.writeState(state)
-			return nil
-		}
-		job, jobErr := windowsCreateKillJob(cmd.Process.Pid)
-		if jobErr != nil {
-			fmt.Fprintf(log, "[%s] spm: warning: cannot create process job: %v\r\n", time.Now().Format(time.RFC3339), jobErr)
-		}
-		state.Status, state.Error, state.PID, state.StartedAt, state.StoppedAt, state.ExitCode = "running", "", cmd.Process.Pid, started, time.Time{}, nil
-		_ = b.writeState(state)
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
-		ticker := time.NewTicker(200 * time.Millisecond)
-		action := ""
-		var waitErr error
-	waitLoop:
-		for {
-			select {
-			case waitErr = <-done:
-				break waitLoop
-			case <-ticker.C:
-				control, ok := b.takeControl(name)
-				if ok && (control.Action == "stop" || control.Action == "restart") {
-					action = control.Action
-					if job != 0 {
-						windowsCloseHandle(job)
-						job = 0
-					} else {
-						_ = cmd.Process.Kill()
-					}
-					waitErr = <-done
-					break waitLoop
-				}
-			}
-		}
-		ticker.Stop()
-		if job != 0 {
-			windowsCloseHandle(job)
-		}
-		exitCode := cmd.ProcessState.ExitCode()
-		state.PID, state.ExitCode, state.StoppedAt = 0, &exitCode, time.Now()
-		fmt.Fprintf(log, "[%s] spm: process exited with code %d\r\n", time.Now().Format(time.RFC3339), exitCode)
-		if action == "stop" {
-			state.Status, state.SupervisorPID = "stopped", 0
-			_ = log.Close()
-			_ = b.writeState(state)
-			return nil
-		}
-		if action == "restart" || windowsShouldRestart(config.Restart, waitErr, exitCode) {
-			state.Status = "restarting"
-			state.Restarts++
-			_ = b.writeState(state)
-			if action != "restart" && delay > 0 {
-				time.Sleep(delay)
-			}
-			continue
-		}
-		state.SupervisorPID = 0
-		if exitCode == 0 {
-			state.Status = "stopped"
-		} else {
-			state.Status = "failed"
-			state.Error = fmt.Sprintf("process exited with code %d", exitCode)
-		}
-		_ = log.Close()
-		_ = b.writeState(state)
-		return nil
-	}
-}
-
-func windowsShouldRestart(policy string, waitErr error, exitCode int) bool {
-	switch policy {
-	case "always":
-		return true
-	case "on-success":
-		return exitCode == 0
-	case "on-failure", "on-abnormal", "on-abort", "on-watchdog":
-		return waitErr != nil || exitCode != 0
-	default:
-		return false
-	}
-}
-
-func windowsEnvironment(config windowsServiceConfig) []string {
-	env := append([]string(nil), os.Environ()...)
-	if config.EnvFile != "" {
-		if file, err := os.Open(config.EnvFile); err == nil {
-			scanner := bufio.NewScanner(file)
-			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
-				if line == "" || strings.HasPrefix(line, "#") {
-					continue
-				}
-				if key, value, ok := strings.Cut(line, "="); ok && key != "" {
-					value = strings.Trim(value, "\"'")
-					env = setWindowsEnv(env, key, value)
-				}
-			}
-			_ = file.Close()
-		}
-	}
-	for _, item := range config.Env {
-		if key, value, ok := strings.Cut(item, "="); ok {
-			env = setWindowsEnv(env, key, value)
-		}
-	}
-	return env
-}
-
-func setWindowsEnv(env []string, key, value string) []string {
-	prefix := strings.ToUpper(key) + "="
-	for i, item := range env {
-		if strings.HasPrefix(strings.ToUpper(item), prefix) {
-			env[i] = key + "=" + value
-			return env
-		}
-	}
-	return append(env, key+"="+value)
-}
-
-func (b *windowsBackend) takeControl(name string) (windowsControl, bool) {
-	var control windowsControl
-	data, err := os.ReadFile(b.controlPath(name))
-	if err != nil || json.Unmarshal(data, &control) != nil {
-		return control, false
-	}
-	if err := os.Remove(b.controlPath(name)); err != nil {
-		return control, false
-	}
-	return control, true
-}
-
 func (b *windowsBackend) sendControl(name, action string) error {
 	state := b.readState(name)
 	if state.SupervisorPID == 0 || !windowsProcessAlive(state.SupervisorPID) {
@@ -1014,12 +775,6 @@ func (b *windowsBackend) sendControl(name, action string) error {
 		return nil
 	}
 	return fmt.Errorf("timed out waiting for %s to %s", name, action)
-}
-
-func (b *windowsBackend) writeControl(name, action string) error {
-	control := windowsControl{Action: action, RequestedAt: time.Now().UnixNano()}
-	data, _ := json.Marshal(control)
-	return writeFileAtomic(b.controlPath(name), data, 0o600)
 }
 
 func (b *windowsBackend) stop(name string) error {
@@ -1379,12 +1134,12 @@ func (b *windowsBackend) status(name string) error {
 	}
 	rows := [][2]string{{"status", state.Status}, {"name", name}, {"scope", scope}, {"account", account}}
 	if config.Mode == "schedule" {
-		scheduleState := readPortableScheduleState(filepath.Join(b.scheduleStateDir(name), "schedule-state.json"))
+		scheduleState := scheduler.ReadState(filepath.Join(b.scheduleStateDir(name), "schedule-state.json"))
 		status := "disabled"
 		if config.Enabled {
 			status = "waiting"
 		}
-		rows = [][2]string{{"status", status}, {"name", name}, {"scope", scope}, {"account", account}, {"enabled", strconv.FormatBool(config.Enabled)}, {"schedule", valueOr(config.Schedule, "-")}, {"interval", valueOr(config.TimerInterval, "-")}, {"on boot", valueOr(config.TimerOnBoot, "-")}, {"timezone", valueOr(config.Timezone, "local")}, {"last scheduled", formatScheduleTime(scheduleState.LastScheduledAt)}, {"last finished", formatScheduleTime(scheduleState.LastFinishedAt)}, {"last exit code", scheduleExitCode(scheduleState.LastExitCode)}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"log", b.logPath(name)}}
+		rows = [][2]string{{"status", status}, {"name", name}, {"scope", scope}, {"account", account}, {"enabled", strconv.FormatBool(config.Enabled)}, {"schedule", valueOr(config.Schedule, "-")}, {"interval", valueOr(config.TimerInterval, "-")}, {"on boot", valueOr(config.TimerOnBoot, "-")}, {"timezone", valueOr(config.Timezone, "local")}, {"last scheduled", scheduler.FormatTime(scheduleState.LastScheduledAt)}, {"last finished", scheduler.FormatTime(scheduleState.LastFinishedAt)}, {"last exit code", scheduler.FormatExitCode(scheduleState.LastExitCode)}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"log", b.logPath(name)}}
 		for _, row := range rows {
 			fmt.Fprintf(w, "%s\t%s\n", row[0], row[1])
 		}
@@ -1443,7 +1198,7 @@ func (b *windowsBackend) logs(args []string) error {
 		time.Sleep(500 * time.Millisecond)
 		for _, name := range names {
 			path := b.logPath(name)
-			info, offset, readErr := readRotatingLogUpdates(b.stdout, path, identities[name], offsets[name], options.grep)
+			info, offset, readErr := common.ReadRotatingLogUpdates(b.stdout, path, identities[name], offsets[name], options.grep)
 			if readErr == nil {
 				identities[name], offsets[name] = info, offset
 			}
@@ -1452,7 +1207,7 @@ func (b *windowsBackend) logs(args []string) error {
 }
 
 func (b *windowsBackend) printLogTail(name string, count int, grep string) error {
-	return printRotatedLogTail(b.stdout, b.logPath(name), count, grep)
+	return common.PrintRotatedLogTail(b.stdout, b.logPath(name), count, grep)
 }
 
 func (b *windowsBackend) selectNames(selectors []string, deleteAll bool) ([]string, error) {
@@ -1570,108 +1325,43 @@ func (b *windowsBackend) doctor() error {
 	} else {
 		check("spm executable", "OK", executable)
 	}
+	for _, name := range []string{supervisorRuntime, schedulerRuntime} {
+		if executable, err := runtimeExecutable(name); err != nil {
+			check(name, "FAIL", err.Error())
+		} else {
+			check(name, "OK", executable)
+		}
+	}
 	if failed {
 		return errors.New("windows doctor found failures")
 	}
 	return nil
 }
 
-func windowsProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	kernel32 := syscall.NewLazyDLL("kernel32.dll")
-	openProcess := kernel32.NewProc("OpenProcess")
-	closeHandle := kernel32.NewProc("CloseHandle")
-	handle, _, _ := openProcess.Call(0x1000, 0, uintptr(pid))
-	if handle == 0 {
-		return false
-	}
-	_, _, _ = closeHandle.Call(handle)
-	return true
-}
+func windowsProcessAlive(pid int) bool { return common.ProcessAlive(pid) }
 
-type windowsJobBasicLimitInformation struct {
-	PerProcessUserTimeLimit int64
-	PerJobUserTimeLimit     int64
-	LimitFlags              uint32
-	MinimumWorkingSetSize   uintptr
-	MaximumWorkingSetSize   uintptr
-	ActiveProcessLimit      uint32
-	Affinity                uintptr
-	PriorityClass           uint32
-	SchedulingClass         uint32
+func (b *windowsBackend) readConfig(name string) (windowsServiceConfig, error) {
+	return b.layout().ReadConfig(name)
 }
+func (b *windowsBackend) readState(name string) windowsServiceState {
+	return b.layout().ReadState(name)
+}
+func (b *windowsBackend) writeState(state windowsServiceState) error {
+	return b.layout().WriteState(state)
+}
+func (b *windowsBackend) takeControl(name string) (windowsControl, bool) {
+	return b.layout().TakeControl(name)
+}
+func (b *windowsBackend) writeControl(name, action string) error {
+	return b.layout().WriteControl(name, action)
+}
+func (b *windowsBackend) supervise(name string) error { return supervisor.Supervise(b.layout(), name) }
 
-type windowsIOCounters struct {
-	ReadOperationCount  uint64
-	WriteOperationCount uint64
-	OtherOperationCount uint64
-	ReadTransferCount   uint64
-	WriteTransferCount  uint64
-	OtherTransferCount  uint64
-}
-
-type windowsJobExtendedLimitInformation struct {
-	BasicLimitInformation windowsJobBasicLimitInformation
-	IoInfo                windowsIOCounters
-	ProcessMemoryLimit    uintptr
-	JobMemoryLimit        uintptr
-	PeakProcessMemoryUsed uintptr
-	PeakJobMemoryUsed     uintptr
-}
-
-func windowsCreateKillJob(pid int) (syscall.Handle, error) {
-	kernel32 := syscall.NewLazyDLL("kernel32.dll")
-	createJob := kernel32.NewProc("CreateJobObjectW")
-	setJob := kernel32.NewProc("SetInformationJobObject")
-	openProcess := kernel32.NewProc("OpenProcess")
-	assignProcess := kernel32.NewProc("AssignProcessToJobObject")
-	handle, _, createErr := createJob.Call(0, 0)
-	if handle == 0 {
-		return 0, createErr
-	}
-	job := syscall.Handle(handle)
-	info := windowsJobExtendedLimitInformation{}
-	info.BasicLimitInformation.LimitFlags = 0x00002000 // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-	result, _, setErr := setJob.Call(handle, 9, uintptr(unsafe.Pointer(&info)), unsafe.Sizeof(info))
-	if result == 0 {
-		windowsCloseHandle(job)
-		return 0, setErr
-	}
-	process, _, openErr := openProcess.Call(0x0100|0x0001, 0, uintptr(pid)) // SET_QUOTA | TERMINATE
-	if process == 0 {
-		windowsCloseHandle(job)
-		return 0, openErr
-	}
-	defer windowsCloseHandle(syscall.Handle(process))
-	result, _, assignErr := assignProcess.Call(handle, process)
-	if result == 0 {
-		windowsCloseHandle(job)
-		return 0, assignErr
-	}
-	return job, nil
-}
-
-func windowsCloseHandle(handle syscall.Handle) {
-	if handle == 0 {
-		return
-	}
-	closeHandle := syscall.NewLazyDLL("kernel32.dll").NewProc("CloseHandle")
-	_, _, _ = closeHandle.Call(uintptr(handle))
-}
-
-func windowsKillTree(pid int) {
-	if pid <= 0 {
-		return
-	}
-	kernel32 := syscall.NewLazyDLL("kernel32.dll")
-	openProcess := kernel32.NewProc("OpenProcess")
-	terminateProcess := kernel32.NewProc("TerminateProcess")
-	process, _, _ := openProcess.Call(0x0001, 0, uintptr(pid)) // PROCESS_TERMINATE
-	if process == 0 {
-		return
-	}
-	defer windowsCloseHandle(syscall.Handle(process))
-	_, _, _ = terminateProcess.Call(process, 1)
-}
+var (
+	windowsShouldRestart = supervisor.ShouldRestart
+	windowsEnvironment   = supervisor.Environment
+	setWindowsEnv        = supervisor.SetEnv
+	windowsCreateKillJob = supervisor.CreateKillJob
+	windowsCloseHandle   = supervisor.CloseHandle
+	windowsKillTree      = supervisor.KillTree
+)

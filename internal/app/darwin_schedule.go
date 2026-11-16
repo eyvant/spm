@@ -3,14 +3,18 @@
 package app
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/eyvant/spm/internal/runtime/scheduler"
 )
 
 func (b *darwinBackend) scheduleRecordPath(name string) string {
@@ -82,16 +86,16 @@ func (b *darwinBackend) schedule(args []string) error {
 	if err := b.writeConfig(config); err != nil {
 		return err
 	}
-	record := portableScheduleRecord{
-		Version: portableScheduleVersion, Name: name, Command: append([]string(nil), config.Command...), Cwd: config.Cwd,
+	record := scheduler.Record{
+		Version: scheduler.RecordVersion, Name: name, Command: append([]string(nil), config.Command...), Cwd: config.Cwd,
 		Env: append([]string(nil), config.Env...), EnvFile: config.EnvFile, Schedule: config.Schedule, Timezone: config.Timezone,
 		TimerOnBoot: config.TimerOnBoot, TimerInterval: config.TimerInterval, TimerRandomDelay: config.TimerRandomDelay,
 		Persistent: config.Persistent, CreatedAt: time.Now().UTC(),
 	}
-	if err := preparePortableScheduleUpdate(b.scheduleRecordPath(name), b.scheduleStateDir(name), &record); err != nil {
+	if err := scheduler.PrepareUpdate(b.scheduleRecordPath(name), b.scheduleStateDir(name), &record); err != nil {
 		return err
 	}
-	if err := writePortableSchedule(b.scheduleRecordPath(name), record); err != nil {
+	if err := scheduler.WriteRecord(b.scheduleRecordPath(name), record); err != nil {
 		_ = os.RemoveAll(b.serviceDir(name))
 		return err
 	}
@@ -150,15 +154,21 @@ func (b *darwinBackend) secureScheduleData(name, account, group string) error {
 }
 
 func (b *darwinBackend) runScheduledTask(name string, force bool) error {
-	args := []string{"--config", b.scheduleRecordPath(name), "--state-dir", b.scheduleStateDir(name), "--log", b.logPath(name), "--activation", "timer"}
+	executable, err := runtimeExecutable(schedulerRuntime)
+	if err != nil {
+		return err
+	}
+	args := []string{"run", "--config", b.scheduleRecordPath(name), "--state-dir", b.scheduleStateDir(name), "--log", b.logPath(name), "--activation", "timer"}
 	if force {
 		args = append(args, "--force")
 	}
-	return runPortableSchedule(args, b.stdout, b.stderr)
+	command := exec.Command(executable, args...)
+	command.Stdout, command.Stderr = b.stdout, b.stderr
+	return command.Run()
 }
 
 func (b *darwinBackend) writeSchedulePlists(config darwinServiceConfig) error {
-	executable, err := os.Executable()
+	executable, err := runtimeExecutable(schedulerRuntime)
 	if err != nil {
 		return err
 	}
@@ -202,7 +212,7 @@ func renderDarwinSchedulePlist(config darwinServiceConfig, label, executable, re
 	builder.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n")
 	darwinPlistKeyString(&builder, "Label", label)
 	builder.WriteString("  <key>ProgramArguments</key>\n  <array>\n")
-	for _, value := range []string{executable, "__scheduled-run", "--config", recordPath, "--state-dir", stateDir, "--log", logPath, "--activation", activation} {
+	for _, value := range []string{executable, "run", "--config", recordPath, "--state-dir", stateDir, "--log", logPath, "--activation", activation} {
 		fmt.Fprintf(&builder, "    <string>%s</string>\n", darwinXMLEscape(value))
 	}
 	builder.WriteString("  </array>\n")
@@ -268,7 +278,7 @@ func (b *darwinBackend) setScheduledEnabled(config darwinServiceConfig, enabled 
 }
 
 func (b *darwinBackend) refreshScheduleDaemon() error {
-	tasks, err := discoverPortableSchedulerTasks(b.root)
+	tasks, err := scheduler.DiscoverTasks(b.root)
 	if err != nil {
 		return err
 	}
@@ -284,7 +294,7 @@ func (b *darwinBackend) refreshScheduleDaemon() error {
 	if err := os.MkdirAll(b.plistDir, 0o755); err != nil {
 		return err
 	}
-	executable, err := os.Executable()
+	executable, err := runtimeExecutable(schedulerRuntime)
 	if err != nil {
 		return err
 	}
@@ -301,23 +311,63 @@ func (b *darwinBackend) refreshScheduleDaemon() error {
 	return nil
 }
 
-// upgradeRuntime restarts the scheduler daemon, the only long-running process
-// on macOS that executes spm itself; launchd runs service commands directly.
-// refreshScheduleDaemon boots the old daemon out and bootstraps a plist that
-// points at the executable running now.
-func (b *darwinBackend) upgradeRuntime() error {
-	tasks, err := discoverPortableSchedulerTasks(b.root)
+// upgradeRuntime moves scheduling onto the installed spm-scheduler. launchd
+// runs service commands directly, so only the scheduler is involved.
+//
+// Job plists that still point elsewhere (older versions ran `spm
+// __scheduled-run`) are rewritten and reloaded. A job that is running right now
+// is not reloaded, because booting it out would kill the run; launchd picks up
+// its rewritten plist at the next login. The scheduler daemon is always
+// restarted onto the new binary.
+func (b *darwinBackend) upgradeRuntime(components upgradeComponents) error {
+	if !components.scheduler {
+		return nil
+	}
+	names, err := b.names()
 	if err != nil {
 		return err
 	}
-	if len(tasks) == 0 {
-		return nil
+	var errs []error
+	for _, name := range names {
+		config, err := b.readConfig(name)
+		if err != nil || config.Mode != "schedule" {
+			continue
+		}
+		before, _ := os.ReadFile(b.servicePlistPath(name))
+		bootBefore, _ := os.ReadFile(b.serviceBootPlistPath(name))
+		if err := b.writeSchedulePlists(config); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+		after, _ := os.ReadFile(b.servicePlistPath(name))
+		bootAfter, _ := os.ReadFile(b.serviceBootPlistPath(name))
+		if !config.Enabled || bytes.Equal(before, after) && bytes.Equal(bootBefore, bootAfter) {
+			continue
+		}
+		if b.readState(name).sub == "running" {
+			fmt.Fprintf(b.stdout, "%s is running; it switches to spm-scheduler at the next login or reboot\n", name)
+			continue
+		}
+		if err := b.bootout(name); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+		if err := b.bootstrapSchedule(config); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		}
 	}
-	if err := b.refreshScheduleDaemon(); err != nil {
-		return fmt.Errorf("restart spm scheduler: %w", err)
+	tasks, err := scheduler.DiscoverTasks(b.root)
+	if err != nil {
+		return errors.Join(append(errs, err)...)
 	}
-	fmt.Fprintln(b.stdout, "spm scheduler restarted")
-	return nil
+	if len(tasks) > 0 {
+		if err := b.refreshScheduleDaemon(); err != nil {
+			errs = append(errs, fmt.Errorf("restart spm scheduler: %w", err))
+		} else {
+			fmt.Fprintln(b.stdout, "spm scheduler restarted")
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (b *darwinBackend) loadedScheduleTarget(target string) bool {
@@ -330,7 +380,7 @@ func renderDarwinScheduleDaemonPlist(label, executable, root, domain, logPath st
 	builder.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n")
 	darwinPlistKeyString(&builder, "Label", label)
 	builder.WriteString("  <key>ProgramArguments</key>\n  <array>\n")
-	for _, value := range []string{executable, "__darwin-schedule-daemon", "--root", root, "--domain", domain} {
+	for _, value := range []string{executable, "daemon", "--root", root, "--domain", domain} {
 		fmt.Fprintf(&builder, "    <string>%s</string>\n", darwinXMLEscape(value))
 	}
 	builder.WriteString("  </array>\n")

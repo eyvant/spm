@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/eyvant/spm/internal/runtime/scheduler"
 	"golang.org/x/sys/windows"
 )
 
@@ -95,16 +96,16 @@ func (b *windowsBackend) schedule(args []string) error {
 	if err := b.writeConfig(config); err != nil {
 		return err
 	}
-	record := portableScheduleRecord{
-		Version: portableScheduleVersion, Name: name, Command: append([]string(nil), config.Command...), Cwd: config.Cwd,
+	record := scheduler.Record{
+		Version: scheduler.RecordVersion, Name: name, Command: append([]string(nil), config.Command...), Cwd: config.Cwd,
 		Env: append([]string(nil), config.Env...), EnvFile: config.EnvFile, Schedule: config.Schedule, Timezone: config.Timezone,
 		TimerOnBoot: config.TimerOnBoot, TimerInterval: config.TimerInterval, TimerRandomDelay: config.TimerRandomDelay,
 		Persistent: config.Persistent, CreatedAt: time.Now().UTC(),
 	}
-	if err := preparePortableScheduleUpdate(b.scheduleRecordPath(name), b.scheduleStateDir(name), &record); err != nil {
+	if err := scheduler.PrepareUpdate(b.scheduleRecordPath(name), b.scheduleStateDir(name), &record); err != nil {
 		return err
 	}
-	if err := writePortableSchedule(b.scheduleRecordPath(name), record); err != nil {
+	if err := scheduler.WriteRecord(b.scheduleRecordPath(name), record); err != nil {
 		_ = os.RemoveAll(b.serviceDir(name))
 		return err
 	}
@@ -137,15 +138,22 @@ func windowsScheduledServiceAccount(account string) bool {
 }
 
 func (b *windowsBackend) runScheduledTask(name string, force bool) error {
-	args := []string{"--config", b.scheduleRecordPath(name), "--state-dir", b.scheduleStateDir(name), "--log", b.logPath(name), "--activation", "timer"}
+	executable, err := runtimeExecutable(schedulerRuntime)
+	if err != nil {
+		return err
+	}
+	args := []string{"run", "--config", b.scheduleRecordPath(name), "--state-dir", b.scheduleStateDir(name), "--log", b.logPath(name), "--activation", "timer"}
 	if force {
 		args = append(args, "--force")
 	}
-	return runPortableSchedule(args, b.stdout, b.stderr)
+	command := exec.Command(executable, args...)
+	command.Stdout, command.Stderr = b.stdout, b.stderr
+	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	return command.Run()
 }
 
 func (b *windowsBackend) registerScheduledTask(config windowsServiceConfig) error {
-	executable, err := os.Executable()
+	executable, err := runtimeExecutable(schedulerRuntime)
 	if err != nil {
 		return err
 	}
@@ -207,7 +215,7 @@ func (b *windowsBackend) scheduledTaskPrincipal(runAs string) (string, string, e
 }
 
 func writeWindowsScheduleLauncher(path, executable, recordPath, stateDir, logPath, activation string) error {
-	arguments := []string{"__scheduled-run", "--config", recordPath, "--state-dir", stateDir, "--log", logPath, "--activation", activation}
+	arguments := []string{"run", "--config", recordPath, "--state-dir", stateDir, "--log", logPath, "--activation", activation}
 	command := windowsQuoteCommand(executable)
 	for _, value := range arguments {
 		command += " " + windowsQuoteCommand(value)
@@ -387,7 +395,7 @@ func (b *windowsBackend) registerUserScheduleDaemonStartup(taskName string) erro
 }
 
 func (b *windowsBackend) refreshScheduleDaemon() error {
-	tasks, err := discoverPortableSchedulerTasks(b.root)
+	tasks, err := scheduler.DiscoverTasks(b.root)
 	if err != nil {
 		return err
 	}
@@ -402,11 +410,11 @@ func (b *windowsBackend) refreshScheduleDaemon() error {
 		}
 		return nil
 	}
-	executable, err := os.Executable()
+	executable, err := runtimeExecutable(schedulerRuntime)
 	if err != nil {
 		return err
 	}
-	if err := writeWindowsHiddenLauncher(b.scheduleDaemonLauncherPath(), executable, []string{"__windows-schedule-daemon", "--root", b.root}); err != nil {
+	if err := writeWindowsHiddenLauncher(b.scheduleDaemonLauncherPath(), executable, []string{"daemon", "--root", b.root}); err != nil {
 		return err
 	}
 	principal, logonType, err := b.scheduledTaskPrincipal("")
