@@ -185,6 +185,28 @@ try {
         $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\spm-$main.lnk"
         if (-not (Test-Path -LiteralPath $shortcut)) { throw 'Startup shortcut was not created.' }
     }
+
+    Write-Host "==> $Scope supervisor upgrade hands the service over without stopping it"
+    $stateFile = Join-Path $data "services\$main\state.json"
+    $before = Get-Content -Raw -LiteralPath $stateFile | ConvertFrom-Json
+    $output = Invoke-Spm @('__upgrade-runtime', '--supervisor') -Capture
+    if (($output -join "`n") -notmatch [regex]::Escape("$main handed over")) {
+        throw "Supervisor upgrade did not hand $main over:`n$($output -join "`n")"
+    }
+    $after = Get-Content -Raw -LiteralPath $stateFile | ConvertFrom-Json
+    if ($after.pid -ne $before.pid -or $null -eq (Get-Process -Id $before.pid -ErrorAction SilentlyContinue)) {
+        throw "Supervisor upgrade restarted $main (pid $($before.pid) -> $($after.pid))"
+    }
+    if ($after.supervisor_pid -le 0 -or $after.supervisor_pid -eq $before.supervisor_pid) {
+        throw "Supervisor upgrade did not replace the supervisor of $main"
+    }
+    if ($system -and (Get-CimInstance Win32_Service -Filter "Name='spm-$main'").State -ne 'Running') {
+        throw "SCM service spm-$main is not running after the handoff"
+    }
+    Wait-Log $main 'took over running process'
+    Invoke-Spm @('restart', $main) | Out-Null
+    Wait-Running $main
+
     Invoke-Spm @('disable', $main) | Out-Null
 
     Write-Host "==> $Scope dependency orchestration"

@@ -126,8 +126,8 @@ func TestWindowsUpgradeRuntimeWithNothingRunning(t *testing.T) {
 	if output.Len() != 0 {
 		t.Fatalf("stopped services were reported as restarted: %q", output.String())
 	}
-	if restarted, err := b.upgradeUserService("idle"); restarted || err != nil {
-		t.Fatalf("upgradeUserService(idle) = %v, %v", restarted, err)
+	if outcome, err := b.upgradeUserService("idle"); outcome != "" || err != nil {
+		t.Fatalf("upgradeUserService(idle) = %q, %v", outcome, err)
 	}
 }
 
@@ -146,5 +146,52 @@ func TestUpgradeRuntimeReportFile(t *testing.T) {
 	}
 	if err := runUpgradeRuntime([]string{"extra"}, io.Discard, io.Discard, false); err == nil {
 		t.Fatal("unexpected argument was accepted")
+	}
+}
+
+// A supervisor upgrade hands a running user service to a new supervisor
+// without stopping it: same service process, new supervisor process.
+func TestWindowsSupervisorUpgradeHandsServiceOver(t *testing.T) {
+	ping, err := exec.LookPath("ping.exe")
+	if err != nil {
+		t.Skipf("ping.exe unavailable: %v", err)
+	}
+	root, err := filepath.Abs(localTempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	b := &windowsBackend{root: root, stdout: &output, stderr: io.Discard}
+	if err := b.start([]string{"--name", "probe", "--no-enable", "--restart", "no", "--", ping, "-n", "120", "127.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.stop("probe") })
+	before := b.readState("probe")
+	if before.PID <= 0 || before.SupervisorPID <= 0 {
+		t.Fatalf("service did not start: %+v", before)
+	}
+
+	outcome, err := b.upgradeUserService("probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := b.readState("probe")
+	if outcome != outcomeHandedOver || after.PID != before.PID || !windowsProcessAlive(before.PID) {
+		t.Fatalf("upgrade = %q; service pid %d -> %d", outcome, before.PID, after.PID)
+	}
+	if after.SupervisorPID == before.SupervisorPID || windowsProcessAlive(before.SupervisorPID) {
+		t.Fatalf("supervisor was not replaced: %d -> %d", before.SupervisorPID, after.SupervisorPID)
+	}
+
+	// The new supervisor fully owns the service: stop terminates it.
+	if err := b.stop("probe"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for windowsProcessAlive(before.PID) && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if b.readState("probe").Status != "stopped" {
+		t.Fatalf("service did not stop after the handoff: %+v", b.readState("probe"))
 	}
 }

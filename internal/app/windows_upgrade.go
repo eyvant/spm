@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/eyvant/spm/internal/runtime/scheduler"
+	"github.com/eyvant/spm/internal/runtime/supervisor"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -25,10 +26,10 @@ import (
 // replaced. A job that is executing right now is left to finish; its next
 // run uses the new binary. Services are not touched.
 //
-// supervisor: user services whose supervisor is running are stopped and
-// started again (the supervisor holds its service in a kill-on-close job, so
-// swapping it always restarts the service); system services get a fresh
-// spm-supervisor.exe copy, and the ones that were running are started again.
+// supervisor: every running service is handed over to the new supervisor
+// without stopping it (see handOver). Services whose supervisor cannot hand
+// over (version 1 had no named job) are restarted instead. System services
+// also get a fresh spm-supervisor.exe copy.
 func (b *windowsBackend) upgradeRuntime(components upgradeComponents) error {
 	var errs []error
 	names, err := b.names()
@@ -50,19 +51,16 @@ func (b *windowsBackend) upgradeRuntime(components upgradeComponents) error {
 		if config.Mode == "schedule" {
 			continue
 		}
-		var restarted bool
+		var outcome string
 		if b.system {
-			restarted, err = b.upgradeSystemService(name)
+			outcome, err = b.upgradeSystemService(name)
 		} else {
-			restarted, err = b.upgradeUserService(name)
+			outcome, err = b.upgradeUserService(name)
 		}
-		switch {
-		case err != nil:
+		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
-		case restarted:
-			fmt.Fprintf(b.stdout, "%s restarted\n", name)
-		case b.system:
-			fmt.Fprintf(b.stdout, "%s updated (not running)\n", name)
+		} else if outcome != "" {
+			fmt.Fprintf(b.stdout, "%s %s\n", name, outcome)
 		}
 	}
 	return errors.Join(errs...)
@@ -105,46 +103,145 @@ func (b *windowsBackend) upgradeScheduler(names []string) []error {
 	return errs
 }
 
-func (b *windowsBackend) upgradeUserService(name string) (bool, error) {
+const (
+	outcomeHandedOver = "handed over to the new supervisor (kept running)"
+	outcomeRestarted  = "restarted"
+)
+
+func (b *windowsBackend) upgradeUserService(name string) (string, error) {
 	state := b.readState(name)
 	if state.SupervisorPID <= 0 || !windowsProcessAlive(state.SupervisorPID) {
-		return false, nil
+		return "", nil
+	}
+	if outcome, err := b.handOver(name, state, func() error { return b.waitProcessExit(state.SupervisorPID) }, func() error { return b.startManaged(name) }); err == nil {
+		return outcome, nil
+	} else if !errors.Is(err, errHandoverUnavailable) {
+		return "", err
 	}
 	if err := b.sendControl(name, "stop"); err != nil {
-		return false, fmt.Errorf("stop: %w", err)
+		return "", fmt.Errorf("stop: %w", err)
 	}
 	if err := b.startManaged(name); err != nil {
-		return false, fmt.Errorf("start: %w", err)
+		return "", fmt.Errorf("start: %w", err)
 	}
-	return true, nil
+	return outcomeRestarted, nil
 }
 
-func (b *windowsBackend) upgradeSystemService(name string) (bool, error) {
+func (b *windowsBackend) upgradeSystemService(name string) (string, error) {
 	if !b.scmInstalled(name) {
-		return false, nil
+		return "", nil
 	}
 	running, err := b.scmRunning(name)
 	if err != nil {
-		return false, err
-	}
-	if running {
-		// spm-supervisor.exe cannot be replaced while the service runs it.
-		if err := b.stopSCMService(name); err != nil {
-			return false, err
-		}
-	}
-	// installSCMService rewrites spm-supervisor.exe from the running
-	// executable and keeps the existing SCM registration.
-	if err := b.installSCMService(name); err != nil {
-		return false, err
+		return "", err
 	}
 	if !running {
-		return false, nil
+		// installSCMService rewrites the service's spm-supervisor.exe copy
+		// and keeps its SCM registration.
+		if err := b.installSCMService(name); err != nil {
+			return "", err
+		}
+		return "updated (not running)", nil
+	}
+	// The service's spm-supervisor.exe copy cannot be replaced while it runs,
+	// so the old supervisor detaches, which stops the SCM service while its
+	// process keeps running; the copy is replaced and the service started
+	// again, and the new supervisor adopts the process.
+	outcome, err := b.handOver(name, b.readState(name), func() error { return b.waitSCMStopped(name) }, func() error {
+		if err := b.installSCMService(name); err != nil {
+			return err
+		}
+		return b.startSCMService(name)
+	})
+	if err == nil {
+		return outcome, nil
+	}
+	if !errors.Is(err, errHandoverUnavailable) {
+		return "", err
+	}
+	if err := b.stopSCMService(name); err != nil {
+		return "", err
+	}
+	if err := b.installSCMService(name); err != nil {
+		return "", err
 	}
 	if err := b.startSCMService(name); err != nil {
-		return false, err
+		return "", err
 	}
-	return true, nil
+	return outcomeRestarted, nil
+}
+
+// errHandoverUnavailable means nothing has changed yet and the service can
+// still be restarted the old way.
+var errHandoverUnavailable = errors.New("supervisor handoff unavailable")
+
+// handOver replaces a service's supervisor without stopping the service:
+//
+//  1. Open the service's job by name. Version 1 supervisors used an unnamed
+//     job, so this fails for them and the caller restarts the service.
+//  2. Ask the old supervisor to detach and wait for it to go (waitOld).
+//     It exits without terminating the process; the job handle held here
+//     keeps the kill-on-close job, and so the process, alive.
+//  3. Start the new supervisor (startNew), which adopts the process.
+//  4. Close the job handle; the new supervisor now holds the job.
+//
+// If this process dies midway, its handle closes and the service process is
+// terminated, the same result as a restart; spm restarts the service when its
+// supervisor next starts.
+func (b *windowsBackend) handOver(name string, state windowsServiceState, waitOld, startNew func() error) (string, error) {
+	if state.PID <= 0 {
+		return "", errHandoverUnavailable
+	}
+	job, err := supervisor.OpenJob(b.layout(), name)
+	if err != nil {
+		return "", errHandoverUnavailable
+	}
+	defer windows.CloseHandle(job)
+	if err := supervisor.Detach(b.layout(), name); err != nil {
+		return "", errHandoverUnavailable
+	}
+	if err := waitOld(); err != nil {
+		// The old supervisor did not act on the request; withdraw it so it
+		// does not detach later, after this handle is gone.
+		_ = os.Remove(b.controlPath(name))
+		return "", fmt.Errorf("previous supervisor did not detach: %w", err)
+	}
+	if err := startNew(); err != nil {
+		return "", fmt.Errorf("start new supervisor: %w", err)
+	}
+	if b.readState(name).PID == state.PID {
+		return outcomeHandedOver, nil
+	}
+	// The process exited during the handoff and the new supervisor applied
+	// the restart policy.
+	return outcomeRestarted, nil
+}
+
+func (b *windowsBackend) waitProcessExit(pid int) error {
+	process, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		return nil
+	}
+	defer windows.CloseHandle(process)
+	if event, err := windows.WaitForSingleObject(process, 15_000); err != nil || event != windows.WAIT_OBJECT_0 {
+		return fmt.Errorf("process %d is still running", pid)
+	}
+	return nil
+}
+
+func (b *windowsBackend) waitSCMStopped(name string) error {
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		running, err := b.scmRunning(name)
+		if err != nil {
+			return err
+		}
+		if !running {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("windows service %s did not stop", b.scmName(name))
 }
 
 func (b *windowsBackend) scmRunning(name string) (bool, error) {

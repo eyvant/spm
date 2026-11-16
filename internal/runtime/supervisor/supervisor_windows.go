@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -69,8 +68,13 @@ type Control struct {
 	RequestedAt int64  `json:"requested_at"`
 }
 
-// Layout locates service files below a data root.
-type Layout struct{ Root string }
+// Layout locates service files below a data root. Global is set for system
+// services; their job objects live in the Global\ namespace so an elevated
+// CLI in another session can open them.
+type Layout struct {
+	Root   string
+	Global bool
+}
 
 func (l Layout) ServicesDir() string           { return filepath.Join(l.Root, "services") }
 func (l Layout) ServiceDir(name string) string { return filepath.Join(l.ServicesDir(), name) }
@@ -161,7 +165,11 @@ func (l Layout) WriteControl(name, action string) error {
 }
 
 // Supervise runs the service command, restarts it according to its policy,
-// and answers stop/restart requests until the service stops.
+// and answers stop/restart/detach requests until the service stops.
+//
+// When the previous supervisor detached (see Detach), Supervise adopts the
+// service process that is still running instead of starting a new one, so a
+// supervisor upgrade does not interrupt the service.
 func Supervise(l Layout, name string) error {
 	config, err := l.ReadConfig(name)
 	if err != nil {
@@ -170,70 +178,60 @@ func Supervise(l Layout, name string) error {
 	if err := l.EnsureDirectories(); err != nil {
 		return err
 	}
+	previous := l.ReadState(name)
+	if previous.SupervisorPID > 0 && previous.SupervisorPID != os.Getpid() {
+		return fmt.Errorf("service %s is already supervised by process %d", name, previous.SupervisorPID)
+	}
 	log, err := os.OpenFile(l.LogPath(name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	defer log.Close()
 	state := State{Version: StateVersion, Name: name, Status: "starting", SupervisorPID: os.Getpid()}
+	adopted := adopt(l, name, previous.PID)
+	if adopted != nil {
+		state.Restarts, state.StartedAt = previous.Restarts, previous.StartedAt
+		fmt.Fprintf(log, "[%s] spm: supervisor %d (version %d) took over running process %d\r\n", time.Now().Format(time.RFC3339), os.Getpid(), Version, adopted.pid)
+	}
 	_ = l.WriteState(state)
 	delay, err := time.ParseDuration(config.RestartSec)
 	if err != nil || delay < 0 {
 		delay = 3 * time.Second
 	}
 	for {
-		fmt.Fprintf(log, "[%s] spm: starting %s\r\n", time.Now().Format(time.RFC3339), strings.Join(config.Command, " "))
-		cmd := exec.Command(config.Command[0], config.Command[1:]...)
-		cmd.Dir = config.Cwd
-		cmd.Env = Environment(config)
-		cmd.Stdout, cmd.Stderr = log, log
-		cmd.Stdin = nil
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		started := time.Now()
-		if err := cmd.Start(); err != nil {
-			state.Status, state.Error, state.PID, state.SupervisorPID = "failed", err.Error(), 0, 0
-			state.StoppedAt = time.Now()
-			fmt.Fprintf(log, "[%s] spm: start failed: %v\r\n", time.Now().Format(time.RFC3339), err)
-			_ = log.Close()
+		current := adopted
+		adopted = nil
+		if current == nil {
+			fmt.Fprintf(log, "[%s] spm: starting %s\r\n", time.Now().Format(time.RFC3339), strings.Join(config.Command, " "))
+			started := time.Now()
+			var jobErr error
+			current, jobErr, err = startChild(l, name, config, log)
+			if err != nil {
+				state.Status, state.Error, state.PID, state.SupervisorPID = "failed", err.Error(), 0, 0
+				state.StoppedAt = time.Now()
+				fmt.Fprintf(log, "[%s] spm: start failed: %v\r\n", time.Now().Format(time.RFC3339), err)
+				_ = log.Close()
+				_ = l.WriteState(state)
+				return nil
+			}
+			if jobErr != nil {
+				fmt.Fprintf(log, "[%s] spm: warning: cannot create process job: %v\r\n", time.Now().Format(time.RFC3339), jobErr)
+			}
+			state.StartedAt = started
+		}
+		state.Status, state.Error, state.PID, state.StoppedAt, state.ExitCode = "running", "", current.pid, time.Time{}, nil
+		_ = l.WriteState(state)
+		action, exitCode := monitor(l, name, current)
+		if action == "detach" {
+			// Whoever asked for the detach holds the job open, so the
+			// service keeps running until the next supervisor adopts it.
+			current.release()
+			state.SupervisorPID = 0
+			fmt.Fprintf(log, "[%s] spm: supervisor %d detached; process %d keeps running\r\n", time.Now().Format(time.RFC3339), os.Getpid(), current.pid)
 			_ = l.WriteState(state)
 			return nil
 		}
-		job, jobErr := CreateKillJob(cmd.Process.Pid)
-		if jobErr != nil {
-			fmt.Fprintf(log, "[%s] spm: warning: cannot create process job: %v\r\n", time.Now().Format(time.RFC3339), jobErr)
-		}
-		state.Status, state.Error, state.PID, state.StartedAt, state.StoppedAt, state.ExitCode = "running", "", cmd.Process.Pid, started, time.Time{}, nil
-		_ = l.WriteState(state)
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
-		ticker := time.NewTicker(200 * time.Millisecond)
-		action := ""
-		var waitErr error
-	waitLoop:
-		for {
-			select {
-			case waitErr = <-done:
-				break waitLoop
-			case <-ticker.C:
-				control, ok := l.TakeControl(name)
-				if ok && (control.Action == "stop" || control.Action == "restart") {
-					action = control.Action
-					if job != 0 {
-						CloseHandle(job)
-						job = 0
-					} else {
-						_ = cmd.Process.Kill()
-					}
-					waitErr = <-done
-					break waitLoop
-				}
-			}
-		}
-		ticker.Stop()
-		if job != 0 {
-			CloseHandle(job)
-		}
-		exitCode := cmd.ProcessState.ExitCode()
+		current.close()
 		state.PID, state.ExitCode, state.StoppedAt = 0, &exitCode, time.Now()
 		fmt.Fprintf(log, "[%s] spm: process exited with code %d\r\n", time.Now().Format(time.RFC3339), exitCode)
 		if action == "stop" {
@@ -241,6 +239,10 @@ func Supervise(l Layout, name string) error {
 			_ = log.Close()
 			_ = l.WriteState(state)
 			return nil
+		}
+		var waitErr error
+		if exitCode != 0 {
+			waitErr = fmt.Errorf("process exited with code %d", exitCode)
 		}
 		if action == "restart" || ShouldRestart(config.Restart, waitErr, exitCode) {
 			state.Status = "restarting"
@@ -261,6 +263,31 @@ func Supervise(l Layout, name string) error {
 		_ = log.Close()
 		_ = l.WriteState(state)
 		return nil
+	}
+}
+
+// monitor waits for the process to exit or for a control request. stop and
+// restart terminate the process first; detach leaves it running.
+func monitor(l Layout, name string, current *child) (string, int) {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case code := <-current.done:
+			return "", int(code)
+		case <-ticker.C:
+			control, ok := l.TakeControl(name)
+			if !ok {
+				continue
+			}
+			switch control.Action {
+			case "stop", "restart":
+				current.kill()
+				return control.Action, int(<-current.done)
+			case "detach":
+				return "detach", 0
+			}
+		}
 	}
 }
 

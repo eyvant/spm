@@ -89,9 +89,12 @@ upgrades replace just the CLI and restart nothing. When a runtime does change:
 - **`spm-scheduler`:** the scheduler daemon is restarted. Services are not
   touched, and a job that is running finishes normally; its next run uses the
   new version.
-- **`spm-supervisor`:** each running service is restarted once, since its
-  supervisor owns the service process. For system services the installer asks
-  for Administrator approval once.
+- **`spm-supervisor`:** each running service is handed over to the new
+  supervisor without being stopped. The old supervisor detaches and leaves the
+  process running; the new one adopts it, keeping its start time and restart
+  count. For system services the installer asks for Administrator approval
+  once. Services started by supervisor version 1 (spm 0.3.6) cannot be handed
+  over and are restarted once instead.
 
 On macOS, system jobs need `sudo`. Linux needs neither runtime. Pass
 `-NoRestart` (Windows) or `--no-restart` (macOS) to keep running processes on

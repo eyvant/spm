@@ -99,6 +99,7 @@ try {
     $deadline = (Get-Date).AddSeconds(15)
     while (-not (Test-Path -LiteralPath $daemonPidFile) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
     $oldSupervisor = (Get-Content -Raw -LiteralPath $probeState | ConvertFrom-Json).supervisor_pid
+    $servicePid = (Get-Content -Raw -LiteralPath $probeState | ConvertFrom-Json).pid
     $oldDaemon = [int](Get-Content -LiteralPath $daemonPidFile)
     Assert-True ($null -ne (Get-Process -Id $oldSupervisor -ErrorAction SilentlyContinue)) "Upgrade probe supervisor is not running"
     Assert-True ($null -ne (Get-Process -Id $oldDaemon -ErrorAction SilentlyContinue)) "Scheduler daemon is not running"
@@ -108,9 +109,9 @@ try {
         Assert-True ((Get-Content -Raw -LiteralPath $probeState | ConvertFrom-Json).supervisor_pid -eq $oldSupervisor) "A CLI-only upgrade restarted the service"
         Assert-True ([int](Get-Content -LiteralPath $daemonPidFile) -eq $oldDaemon) "A CLI-only upgrade restarted the scheduler"
 
-        # Missing runtimes, as after an install from before they existed, count
-        # as changed: every process moves onto the new runtimes. The running
-        # binaries can be renamed but not deleted.
+        # Missing runtimes count as changed: the scheduler daemon is replaced
+        # and the service is handed to a new supervisor without stopping it.
+        # The running binaries can be renamed but not deleted.
         Move-Item -LiteralPath $installedSupervisor -Destination "$installedSupervisor.old-test"
         Move-Item -LiteralPath $installedScheduler -Destination "$installedScheduler.old-test"
         & $installer -InstallDir $installDir -NoCompletion -NoPath
@@ -125,7 +126,9 @@ try {
         }
         Assert-True ($null -eq (Get-Process -Id $oldSupervisor -ErrorAction SilentlyContinue)) "Upgrade left the old supervisor running"
         Assert-True ($null -eq (Get-Process -Id $oldDaemon -ErrorAction SilentlyContinue)) "Upgrade left the old scheduler daemon running"
-        Assert-True ($newSupervisor -ne $oldSupervisor -and $null -ne (Get-Process -Id $newSupervisor -ErrorAction SilentlyContinue)) "Upgrade did not restart the service supervisor"
+        Assert-True ($newSupervisor -ne $oldSupervisor -and $null -ne (Get-Process -Id $newSupervisor -ErrorAction SilentlyContinue)) "Upgrade did not replace the service supervisor"
+        $probe = Get-Content -Raw -LiteralPath $probeState | ConvertFrom-Json
+        Assert-True ($probe.pid -eq $servicePid -and $null -ne (Get-Process -Id $servicePid -ErrorAction SilentlyContinue)) "The supervisor upgrade restarted the service (pid $servicePid -> $($probe.pid))"
         Assert-True ($newDaemon -ne $oldDaemon -and $null -ne (Get-Process -Id $newDaemon -ErrorAction SilentlyContinue)) "Upgrade did not restart the scheduler daemon"
         $image = (Get-Process -Id $newSupervisor).Path
         Assert-True ($image -ieq $installedSupervisor) "The service supervisor runs $image instead of the installed spm-supervisor"

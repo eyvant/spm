@@ -22,7 +22,7 @@ func Main(args []string, stdout, _ io.Writer) error {
 	if len(args) != 4 || args[1] != "--root" || !filepath.IsAbs(args[2]) {
 		return errors.New("usage: spm-supervisor version | supervise --root ROOT NAME | service --root ROOT NAME")
 	}
-	layout := Layout{Root: filepath.Clean(args[2])}
+	layout := Layout{Root: filepath.Clean(args[2]), Global: args[0] == "service"}
 	switch args[0] {
 	case "supervise":
 		return Supervise(layout, args[3])

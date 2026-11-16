@@ -38,7 +38,9 @@ type (
 	windowsControl       = supervisor.Control
 )
 
-func (b *windowsBackend) layout() supervisor.Layout { return supervisor.Layout{Root: b.root} }
+func (b *windowsBackend) layout() supervisor.Layout {
+	return supervisor.Layout{Root: b.root, Global: b.system}
+}
 
 type windowsBackend struct {
 	stdout io.Writer
