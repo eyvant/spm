@@ -13,6 +13,9 @@ DECLARED=$PREFIX-declared
 SCHEDULE=$PREFIX-scheduled
 SCHEDULE_DECLARED=$PREFIX-scheduled-declared
 ROTATION=$PREFIX-log-rotation
+HOT_JOB=$PREFIX-hot-job
+STEADY=$PREFIX-steady
+HOT_MARKER=${RUNNER_TEMP:-/tmp}/$PREFIX-hot-marker.log
 CRASHING=$PREFIX-crashing
 MARKER="SPM_MACOS_READY_$PREFIX"
 TOML=${RUNNER_TEMP:-/tmp}/$PREFIX.toml
@@ -44,13 +47,13 @@ diagnose() {
 cleanup() {
   trap - ERR
   set +e
-  for name in "$CRASHING" "$ROTATION" "$SCHEDULE_DECLARED" "$SCHEDULE" "$DEPENDENT" "$DEPENDENCY" "$DECLARED" "$MAIN"; do
+  for name in "$HOT_JOB" "$STEADY" "$CRASHING" "$ROTATION" "$SCHEDULE_DECLARED" "$SCHEDULE" "$DEPENDENT" "$DEPENDENCY" "$DECLARED" "$MAIN"; do
     command_spm stop "$name" >/dev/null 2>&1
     command_spm delete --yes "$name" >/dev/null 2>&1
   done
   rm -f "$TOML"
   rm -f "$CRASH_LOG"
-  rm -f "$SCHEDULE_MARKER" "$SCHEDULE_TOML"
+  rm -f "$SCHEDULE_MARKER" "$SCHEDULE_TOML" "$HOT_MARKER"
 }
 trap diagnose ERR
 trap cleanup EXIT
@@ -176,6 +179,68 @@ command_spm disable "$SCHEDULE"
 test ! -e "$SCHEDULE_PLIST"
 command_spm enable "$SCHEDULE"
 test -f "$SCHEDULE_PLIST"
+
+echo "==> macOS $SCOPE scheduler upgrade interrupts neither a running job nor a service"
+if [[ $SCOPE == system ]]; then
+  DOMAIN=system
+  launchd_pid() { sudo launchctl print "$DOMAIN/$1" 2>/dev/null | awk '$1 == "pid" { print $3; exit }'; }
+  run_as=(--user root --group wheel)
+else
+  DOMAIN=gui/$(id -u)
+  launchd_pid() { launchctl print "$DOMAIN/$1" 2>/dev/null | awk '$1 == "pid" { print $3; exit }'; }
+  run_as=()
+fi
+command_spm start --name "$STEADY" --no-enable --restart no ${run_as[@]+"${run_as[@]}"} -- /bin/sleep 300
+wait_running "$STEADY"
+STEADY_PID=$(command_spm status "$STEADY" | awk '$1 == "pid" { print $2 }')
+# Every 5 seconds, a run that lasts 8 seconds: the run lock keeps one at a time.
+command_spm schedule --name "$HOT_JOB" --cron '*/5 * * * * *' --timezone UTC --cwd /tmp ${run_as[@]+"${run_as[@]}"} \
+  -- /bin/sh -c "echo start >> '$HOT_MARKER'; sleep 8; echo end >> '$HOT_MARKER'"
+RUN_PID=
+for _ in {1..60}; do
+  RUN_PID=$(launchd_pid "com.eyvant.spm.$HOT_JOB")
+  [[ -n $RUN_PID ]] && break
+  sleep 0.5
+done
+[[ -n $RUN_PID ]] || { echo "$HOT_JOB never started a run" >&2; false; }
+ENDS_BEFORE=$(grep -c '^end$' "$HOT_MARKER" || true)
+DAEMON_PID=$(launchd_pid com.eyvant.spm.scheduler)
+[[ -n $DAEMON_PID ]]
+
+command_spm __upgrade-runtime --scheduler | tee /dev/stderr | grep -F 'spm scheduler restarted'
+
+NEW_DAEMON_PID=
+for _ in {1..40}; do
+  NEW_DAEMON_PID=$(launchd_pid com.eyvant.spm.scheduler)
+  [[ -n $NEW_DAEMON_PID && $NEW_DAEMON_PID != "$DAEMON_PID" ]] && break
+  sleep 0.25
+done
+[[ -n $NEW_DAEMON_PID && $NEW_DAEMON_PID != "$DAEMON_PID" ]] || { echo "scheduler daemon was not replaced" >&2; false; }
+ps -o command= -p "$NEW_DAEMON_PID" | grep -F 'spm-scheduler'
+for _ in {1..40}; do
+  ps -p "$DAEMON_PID" >/dev/null || break
+  sleep 0.25
+done
+! ps -p "$DAEMON_PID" >/dev/null || { echo "old scheduler daemon $DAEMON_PID is still running" >&2; false; }
+# The run that was in progress keeps going and finishes normally.
+ps -p "$RUN_PID" >/dev/null || { echo "the in-progress run of $HOT_JOB was killed" >&2; false; }
+for _ in {1..40}; do
+  [[ $(grep -c '^end$' "$HOT_MARKER" || true) -gt $ENDS_BEFORE ]] && break
+  sleep 0.5
+done
+[[ $(grep -c '^end$' "$HOT_MARKER" || true) -gt $ENDS_BEFORE ]] || { echo "the in-progress run did not finish" >&2; false; }
+# The service was not touched.
+[[ $(command_spm status "$STEADY" | awk '$1 == "pid" { print $2 }') == "$STEADY_PID" ]] || { echo "$STEADY was restarted" >&2; false; }
+# The new daemon keeps scheduling.
+STARTS_AFTER=$(grep -c '^start$' "$HOT_MARKER")
+for _ in {1..40}; do
+  [[ $(grep -c '^start$' "$HOT_MARKER") -gt $STARTS_AFTER ]] && break
+  sleep 0.5
+done
+[[ $(grep -c '^start$' "$HOT_MARKER") -gt $STARTS_AFTER ]] || { echo "no run was scheduled after the upgrade" >&2; false; }
+command_spm status "$HOT_JOB" | grep -Eq '^last exit code[[:space:]]+0$'
+command_spm stop "$HOT_JOB" >/dev/null 2>&1 || true
+command_spm delete --yes "$HOT_JOB" "$STEADY"
 
 echo "==> macOS $SCOPE declarative scheduled task"
 cat >"$SCHEDULE_TOML" <<EOF
