@@ -12,6 +12,25 @@ It works with each operating system's native service manager:
 
 SPM aims to make service management consistent, simple, and intuitive across platforms.
 
+### Built for coding agents
+
+Coding agents such as Claude Code, Codex, and Cursor often start dev servers and
+workers with `&` or `nohup`. Those processes die or become orphans when the
+session ends, and their output is lost. With spm, an agent starts them as real
+native services instead: they keep running, restart on crash and at login, and
+their logs stay readable through `spm logs` or the built-in MCP server.
+
+```bash
+claude plugin marketplace add eyvant/spm && claude plugin install spm@eyvant-spm
+codex mcp add spm -- spm mcp
+```
+
+[![Install in Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=spm&config=eyJjb21tYW5kIjoic3BtIiwiYXJncyI6WyJtY3AiXX0=)
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_MCP_server-0098FF?logo=visualstudiocode)](https://insiders.vscode.dev/redirect/mcp/install?name=spm&config=%7B%22command%22%3A%22spm%22%2C%22args%22%3A%5B%22mcp%22%5D%7D)
+
+Install spm itself first (see [Install](#install)). See
+[Agent and MCP integration](#agent-and-mcp-integration) for every client.
+
 Under the hood, Linux uses systemd and journald, macOS uses launchd LaunchAgents or LaunchDaemons, and Windows uses per-user supervisors with Startup integration or native SCM services for system scope.
 
 > User services do not require elevation. Use `--system` explicitly when a service must run at the machine level.
@@ -716,6 +735,28 @@ inspect and manage services through focused, structured tools:
 spm mcp
 ```
 
+The repository also ships an agent skill,
+[`plugins/spm/skills/spm/SKILL.md`](plugins/spm/skills/spm/SKILL.md), that
+teaches an agent to start long-lived processes with spm instead of `&` or
+`nohup`, to check them with bounded log reads, and to ask before deleting or
+using `--system`. Any agent that reads `SKILL.md` files can use it; copy the
+`spm` directory into the agent's skills folder (for example
+`~/.claude/skills/` or `~/.codex/skills/`).
+
+### Claude Code plugin
+
+The plugin bundles the MCP server and the skill:
+
+```bash
+claude plugin marketplace add eyvant/spm
+claude plugin install spm@eyvant-spm
+```
+
+Inside a session, `/plugin marketplace add eyvant/spm` does the same. The
+plugin runs the `spm` on your `PATH`, so install spm first.
+
+### Codex
+
 Add it to Codex after installing `spm`:
 
 ```bash
@@ -744,14 +785,24 @@ are marked destructive so MCP hosts can request approval. Machine-wide calls
 use the tool's `system` option and remain subject to normal platform privilege
 checks.
 
-Claude Code uses the same stdio server:
+### Claude Code without the plugin
 
 ```bash
 claude mcp add spm -- spm mcp
 ```
 
 Run `/mcp` inside Claude Code to verify that the server is connected and its
-tools are available. For Claude Desktop, add the following entry to
+tools are available.
+
+### Cursor and VS Code
+
+Use the install buttons in [Built for coding agents](#built-for-coding-agents),
+or add `{"command": "spm", "args": ["mcp"]}` as a stdio server named `spm` in
+`.cursor/mcp.json` or VS Code's `mcp.json` (under `servers`).
+
+### Claude Desktop
+
+For Claude Desktop, add the following entry to
 `claude_desktop_config.json` and fully restart the app:
 
 ```json

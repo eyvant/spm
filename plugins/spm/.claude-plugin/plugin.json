@@ -1,0 +1,12 @@
+{
+  "name": "spm",
+  "description": "Run dev servers, workers, and scheduled jobs as persistent native services (systemd, launchd, Windows services) instead of background shells that die with the session. Adds the spm MCP server and a skill that teaches when to use it.",
+  "author": {
+    "name": "eyvant",
+    "url": "https://github.com/eyvant"
+  },
+  "homepage": "https://github.com/eyvant/spm",
+  "repository": "https://github.com/eyvant/spm",
+  "license": "MIT",
+  "keywords": ["services", "process-manager", "systemd", "launchd", "windows-service", "background", "dev-server", "cron", "mcp"]
+}

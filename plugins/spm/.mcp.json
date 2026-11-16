@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "spm": {
+      "command": "spm",
+      "args": ["mcp"]
+    }
+  }
+}

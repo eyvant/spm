@@ -1,0 +1,19 @@
+# spm
+
+> spm is a cross-platform command-line manager for native system services. It runs a command as a systemd unit (Linux), a launchd LaunchAgent or LaunchDaemon (macOS), or a supervised user service or SCM service (Windows), with restart on crash, start at login or boot, logs, and scheduled jobs. It includes a stdio MCP server (`spm mcp`) so coding agents can start and inspect long-lived processes instead of backgrounding them with `&` or `nohup`.
+
+Key facts for agents:
+
+- Start a persistent process: `spm start --name NAME -- COMMAND ARGS...` (working directory is the current directory).
+- Inspect: `spm list --json`, `spm show NAME`, `spm logs NAME -n 100`. Do not use `spm logs -f` or `spm list --watch`; they never return.
+- Control: `spm restart|stop|delete NAME`. An existing name is not replaced unless `--force` is given.
+- Periodic jobs that exit: `spm schedule --name NAME --cron "0 3 * * *" -- COMMAND`.
+- User scope is the default and needs no elevation; `--system` needs root or Administrator.
+- Put secrets in `--env-file`, not `--env`.
+
+## Docs
+
+- [README](https://github.com/eyvant/spm/blob/main/README.md): install, commands, configuration, PM2 command map
+- [Agent and MCP integration](https://github.com/eyvant/spm#agent-and-mcp-integration): MCP setup for Claude Code, Codex, Cursor, VS Code, Claude Desktop
+- [Agent skill](https://github.com/eyvant/spm/blob/main/plugins/spm/skills/spm/SKILL.md): when and how an agent should use spm
+- [Cross-platform scheduling](https://github.com/eyvant/spm/blob/main/docs/cross-platform-scheduling.md)

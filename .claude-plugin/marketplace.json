@@ -1,0 +1,15 @@
+{
+  "name": "eyvant-spm",
+  "description": "spm: persistent native services for coding agents",
+  "owner": {
+    "name": "eyvant",
+    "url": "https://github.com/eyvant"
+  },
+  "plugins": [
+    {
+      "name": "spm",
+      "source": "./plugins/spm",
+      "description": "Run dev servers, workers, and scheduled jobs as persistent native services instead of background shells that die with the session."
+    }
+  ]
+}
