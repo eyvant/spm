@@ -160,10 +160,10 @@ func TestAdoptRejectsProcessOutsideTheJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer windows.CloseHandle(job)
-	if adopted := adopt(l, name, stranger.Process.Pid); adopted != nil {
+	if adopted, _ := adopt(l, name, stranger.Process.Pid); adopted != nil {
 		t.Fatal("adopted a process outside the service's job")
 	}
-	if adopted := adopt(l, name, 0); adopted != nil {
+	if adopted, _ := adopt(l, name, 0); adopted != nil {
 		t.Fatal("adopted PID 0")
 	}
 }

@@ -191,7 +191,8 @@ try {
     $before = Get-Content -Raw -LiteralPath $stateFile | ConvertFrom-Json
     $output = Invoke-Spm @('__upgrade-runtime', '--supervisor') -Capture
     if (($output -join "`n") -notmatch [regex]::Escape("$main handed over")) {
-        throw "Supervisor upgrade did not hand $main over:`n$($output -join "`n")"
+        $serviceLog = Get-Content -LiteralPath (Join-Path $data "services\$main\service.log") -Tail 20 -ErrorAction SilentlyContinue
+        throw "Supervisor upgrade did not hand $main over:`n$($output -join "`n")`nSERVICE LOG`n$($serviceLog -join "`n")"
     }
     $after = Get-Content -Raw -LiteralPath $stateFile | ConvertFrom-Json
     if ($after.pid -ne $before.pid -or $null -eq (Get-Process -Id $before.pid -ErrorAction SilentlyContinue)) {

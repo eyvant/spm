@@ -113,9 +113,11 @@ func (b *windowsBackend) upgradeUserService(name string) (string, error) {
 	if state.SupervisorPID <= 0 || !windowsProcessAlive(state.SupervisorPID) {
 		return "", nil
 	}
-	if outcome, err := b.handOver(name, state, func() error { return b.waitProcessExit(state.SupervisorPID) }, func() error { return b.startManaged(name) }); err == nil {
+	outcome, err := b.handOver(name, state, func() error { return b.waitProcessExit(state.SupervisorPID) }, func() error { return b.startManaged(name) })
+	if err == nil {
 		return outcome, nil
-	} else if !errors.Is(err, errHandoverUnavailable) {
+	}
+	if !errors.Is(err, errHandoverUnavailable) {
 		return "", err
 	}
 	if err := b.sendControl(name, "stop"); err != nil {
@@ -124,7 +126,7 @@ func (b *windowsBackend) upgradeUserService(name string) (string, error) {
 	if err := b.startManaged(name); err != nil {
 		return "", fmt.Errorf("start: %w", err)
 	}
-	return outcomeRestarted, nil
+	return restartedBecause(err), nil
 }
 
 func (b *windowsBackend) upgradeSystemService(name string) (string, error) {
@@ -168,12 +170,17 @@ func (b *windowsBackend) upgradeSystemService(name string) (string, error) {
 	if err := b.startSCMService(name); err != nil {
 		return "", err
 	}
-	return outcomeRestarted, nil
+	return restartedBecause(err), nil
+}
+
+// restartedBecause reports a restart that replaced a handoff, with the reason.
+func restartedBecause(err error) string {
+	return fmt.Sprintf("%s (%v)", outcomeRestarted, err)
 }
 
 // errHandoverUnavailable means nothing has changed yet and the service can
 // still be restarted the old way.
-var errHandoverUnavailable = errors.New("supervisor handoff unavailable")
+var errHandoverUnavailable = errors.New("could not hand over")
 
 // handOver replaces a service's supervisor without stopping the service:
 //
@@ -190,15 +197,16 @@ var errHandoverUnavailable = errors.New("supervisor handoff unavailable")
 // supervisor next starts.
 func (b *windowsBackend) handOver(name string, state windowsServiceState, waitOld, startNew func() error) (string, error) {
 	if state.PID <= 0 {
-		return "", errHandoverUnavailable
+		return "", fmt.Errorf("%w: no running process recorded", errHandoverUnavailable)
 	}
 	job, err := supervisor.OpenJob(b.layout(), name)
 	if err != nil {
-		return "", errHandoverUnavailable
+		// Version 1 supervisors used an unnamed job.
+		return "", fmt.Errorf("%w: %v", errHandoverUnavailable, err)
 	}
 	defer windows.CloseHandle(job)
 	if err := supervisor.Detach(b.layout(), name); err != nil {
-		return "", errHandoverUnavailable
+		return "", fmt.Errorf("%w: %v", errHandoverUnavailable, err)
 	}
 	if err := waitOld(); err != nil {
 		// The old supervisor did not act on the request; withdraw it so it
@@ -212,9 +220,9 @@ func (b *windowsBackend) handOver(name string, state windowsServiceState, waitOl
 	if b.readState(name).PID == state.PID {
 		return outcomeHandedOver, nil
 	}
-	// The process exited during the handoff and the new supervisor applied
-	// the restart policy.
-	return outcomeRestarted, nil
+	// The process exited during the handoff, or the new supervisor could not
+	// take it over; its service log says which.
+	return outcomeRestarted + " (the new supervisor started a new process; see the service log)", nil
 }
 
 func (b *windowsBackend) waitProcessExit(pid int) error {

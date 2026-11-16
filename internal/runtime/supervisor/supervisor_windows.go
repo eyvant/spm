@@ -188,10 +188,15 @@ func Supervise(l Layout, name string) error {
 	}
 	defer log.Close()
 	state := State{Version: StateVersion, Name: name, Status: "starting", SupervisorPID: os.Getpid()}
-	adopted := adopt(l, name, previous.PID)
+	adopted, adoptErr := adopt(l, name, previous.PID)
 	if adopted != nil {
 		state.Restarts, state.StartedAt = previous.Restarts, previous.StartedAt
 		fmt.Fprintf(log, "[%s] spm: supervisor %d (version %d) took over running process %d\r\n", time.Now().Format(time.RFC3339), os.Getpid(), Version, adopted.pid)
+	} else if previous.PID > 0 {
+		fmt.Fprintf(log, "[%s] spm: could not take over process %d: %v\r\n", time.Now().Format(time.RFC3339), previous.PID, adoptErr)
+		if terminateLeftoverJob(l, name) {
+			fmt.Fprintf(log, "[%s] spm: terminated the processes left in the service's job\r\n", time.Now().Format(time.RFC3339))
+		}
 	}
 	_ = l.WriteState(state)
 	delay, err := time.ParseDuration(config.RestartSec)
