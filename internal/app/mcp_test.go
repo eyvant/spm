@@ -207,3 +207,18 @@ func FuzzDecodeMCPArguments(f *testing.F) {
 		_ = decodeMCPArguments(json.RawMessage(input), &args)
 	})
 }
+
+func TestMCPToolDefinitionsGuideAgents(t *testing.T) {
+	for _, tool := range spmMCPTools() {
+		if !strings.HasSuffix(tool.Description, scopeNote) {
+			t.Errorf("%s description does not end with the scope note", tool.Name)
+		}
+		if tool.Name == "spm_list_services" {
+			if tool.OutputSchema == nil {
+				t.Errorf("%s has no output schema", tool.Name)
+			}
+		} else if tool.OutputSchema != nil {
+			t.Errorf("%s declares an output schema but returns text", tool.Name)
+		}
+	}
+}
