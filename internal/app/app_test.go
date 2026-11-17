@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -97,6 +98,57 @@ func TestLogsPassesLinesToJournalWhenOrderIsSafe(t *testing.T) {
 		if calls := callsString(runner.calls); !strings.Contains(calls, "--lines 5") {
 			t.Errorf("logs %v did not pass --lines to journalctl: %s", args, calls)
 		}
+	}
+}
+
+type exitCodeError int
+
+func (e exitCodeError) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+func (e exitCodeError) ExitCode() int { return int(e) }
+
+func TestLogsGrepWithoutMatchesIsNotAnError(t *testing.T) {
+	directory := localTempDir(t)
+	if err := os.WriteFile(filepath.Join(directory, unitName("api")), []byte("unit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"api", "--grep", "missing"},
+		{"api", "--grep", "missing", "--output", "verbose"},
+	} {
+		runner := &fakeRunner{interactiveOutput: "-- No entries --\n", interactiveErr: exitCodeError(1)}
+		var stdout strings.Builder
+		a := &application{runner: runner, stdout: &stdout, stderr: io.Discard, unitDir: directory}
+		if err := a.logs(args); err != nil {
+			t.Fatalf("logs %v = %v, want no error", args, err)
+		}
+		if got := stdout.String(); got != "-- No entries --\n" {
+			t.Errorf("logs %v printed %q", args, got)
+		}
+		if len(runner.calls) != 1 {
+			t.Errorf("logs %v retried journalctl after no matches: %s", args, callsString(runner.calls))
+		}
+	}
+}
+
+func TestLogsGrepKeepsRealJournalErrors(t *testing.T) {
+	directory := localTempDir(t)
+	if err := os.WriteFile(filepath.Join(directory, unitName("api")), []byte("unit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, runner := range []*fakeRunner{
+		{interactiveErr: exitCodeError(1)}, // bad pattern: message on stderr only
+		{interactiveOutput: "-- No entries --\n", interactiveErr: exitCodeError(2)},
+		{interactiveOutput: "line\n-- No entries --\n", interactiveErr: exitCodeError(1)},
+	} {
+		a := &application{runner: runner, stdout: io.Discard, stderr: io.Discard, unitDir: directory}
+		if err := a.logs([]string{"api", "--grep", "("}); err == nil {
+			t.Errorf("logs with output %q and %v returned no error", runner.interactiveOutput, runner.interactiveErr)
+		}
+	}
+	runner := &fakeRunner{interactiveOutput: "-- No entries --\n", interactiveErr: exitCodeError(1)}
+	a := &application{runner: runner, stdout: io.Discard, stderr: io.Discard, unitDir: directory}
+	if err := a.logs([]string{"api"}); err == nil {
+		t.Error("logs without --grep hid a journalctl failure")
 	}
 }
 

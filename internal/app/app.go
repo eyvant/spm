@@ -1622,30 +1622,65 @@ func (a *application) logs(args []string) error {
 			fallbackArgs = append(fallbackArgs, "--output", options.output)
 		}
 	}
-	stdout := a.stdout
+	var stdout io.Writer = a.stdout
 	if tail != nil {
 		stdout = tail
 	}
-	err = a.runner.Interactive(a.input(), stdout, a.stderr, "journalctl", journalArgs...)
-	if err != nil && !terminatedBySignal(err) && fallbackArgs != nil {
+	watch := &journalOutputWatcher{out: stdout}
+	err = a.runner.Interactive(a.input(), watch, a.stderr, "journalctl", journalArgs...)
+	noMatches := options.grep != "" && journalFoundNoMatches(err, watch)
+	if err != nil && !noMatches && !terminatedBySignal(err) && fallbackArgs != nil {
 		if tail != nil {
 			tail.reset()
 		}
-		err = a.runner.Interactive(a.input(), stdout, a.stderr, "journalctl", fallbackArgs...)
+		watch.reset()
+		err = a.runner.Interactive(a.input(), watch, a.stderr, "journalctl", fallbackArgs...)
+		noMatches = options.grep != "" && journalFoundNoMatches(err, watch)
 	}
-	// Print what was kept even when journalctl failed: with no matches it
-	// exits 1 after printing "-- No entries --".
+	// Print what was kept even when journalctl failed, such as its
+	// "-- No entries --" line.
 	if tail != nil {
 		if _, writeErr := tail.writeTo(a.stdout); writeErr != nil {
 			return writeErr
 		}
 	}
-	if err == nil || terminatedBySignal(err) {
+	if err == nil || noMatches || terminatedBySignal(err) {
 		// A signal usually means the reader went away, for example
 		// `spm logs | head`, so it is neither an error nor a reason to retry.
 		return nil
 	}
 	return err
+}
+
+// journalFoundNoMatches reports whether journalctl failed only because
+// --grep matched nothing: it then exits 1 and prints just "-- No entries --",
+// while real errors such as a bad pattern go to stderr.
+func journalFoundNoMatches(err error, watch *journalOutputWatcher) bool {
+	var exit interface{ ExitCode() int }
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		return false
+	}
+	return watch.total == len(watch.head) && strings.TrimSpace(string(watch.head)) == "-- No entries --"
+}
+
+// journalOutputWatcher passes journalctl output through and remembers its
+// beginning, enough to recognise the "-- No entries --" notice.
+type journalOutputWatcher struct {
+	out   io.Writer
+	head  []byte
+	total int
+}
+
+func (w *journalOutputWatcher) Write(p []byte) (int, error) {
+	if room := 64 - len(w.head); room > 0 {
+		w.head = append(w.head, p[:min(room, len(p))]...)
+	}
+	w.total += len(p)
+	return w.out.Write(p)
+}
+
+func (w *journalOutputWatcher) reset() {
+	w.head, w.total = nil, 0
 }
 
 // journalOutputIsLinePerEntry reports whether a journalctl output format
