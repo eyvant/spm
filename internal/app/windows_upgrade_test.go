@@ -183,12 +183,30 @@ func TestWindowsSupervisorUpgradeHandsServiceOver(t *testing.T) {
 	if after.SupervisorPID == before.SupervisorPID || windowsProcessAlive(before.SupervisorPID) {
 		t.Fatalf("supervisor was not replaced: %d -> %d", before.SupervisorPID, after.SupervisorPID)
 	}
+	// The output pipe moved with the service: what ping prints after the
+	// handoff still reaches service.log.
+	countReplies := func() int {
+		data, _ := os.ReadFile(b.logPath("probe"))
+		return strings.Count(string(data), "127.0.0.1:")
+	}
+	handedOver := countReplies()
+	deadline := time.Now().Add(10 * time.Second)
+	for countReplies() < handedOver+2 && time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+	}
+	if got := countReplies(); got < handedOver+2 {
+		t.Fatalf("service output stopped after the handoff: %d replies before, %d after", handedOver, got)
+	}
+	events, _ := os.ReadFile(b.eventLogPath("probe"))
+	if !strings.Contains(string(events), "took over running process") {
+		t.Fatalf("handoff was not recorded:\n%s", events)
+	}
 
 	// The new supervisor fully owns the service: stop terminates it.
 	if err := b.stop("probe"); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	deadline = time.Now().Add(10 * time.Second)
 	for windowsProcessAlive(before.PID) && time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
 	}

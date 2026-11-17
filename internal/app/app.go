@@ -594,6 +594,10 @@ Options:
 
 Without a name, logs from all managed services are merged.
 
+By default spm shows what the services wrote. --spm shows what spm recorded
+about them instead: starts, exits and exit codes, scheduled runs, restarts and
+supervisor upgrades. On Linux that is systemd's own messages about the units.
+
 Options:
   -f, --follow                Follow new log entries
   -n, --lines N               Show the last N entries
@@ -602,6 +606,8 @@ Options:
   --grep PATTERN              Filter messages by pattern
   --boot                      Only show entries from the current boot
   --health                    Show health check and recovery logs
+  --spm                       Show spm's records about the services
+  --scheduler                 Show the spm scheduler's log (Windows, macOS)
   -o, --output FORMAT         journalctl output format
 
 Options may appear before or after the service name.
@@ -1533,6 +1539,9 @@ func (a *application) logs(args []string) error {
 	if err != nil {
 		return err
 	}
+	if options.scheduler {
+		return errors.New("there is no spm scheduler on Linux: systemd timers run scheduled jobs; use 'spm logs --spm NAME' to see a job's runs")
+	}
 	names := options.names
 	if len(names) == 0 || len(names) == 1 && names[0] == "all" {
 		names, err = a.managedNames()
@@ -1561,17 +1570,37 @@ func (a *application) logs(args []string) error {
 		return errors.New("none of the selected services has a health check")
 	}
 	journalArgs := []string{}
-	for _, unit := range units {
-		journalArgs = append(journalArgs, "--unit", unit)
+	var fallbackArgs []string
+	if options.spm {
+		// systemd's own messages about a unit (started, stopped, exit
+		// status, restart scheduled) carry UNIT= from the system manager and
+		// USER_UNIT= from a user manager, while the service's output does
+		// not, so matching on them leaves only what systemd recorded.
+		for _, unit := range units {
+			if a.system {
+				journalArgs = append(journalArgs, "UNIT="+unit)
+			} else {
+				journalArgs = append(journalArgs, "USER_UNIT="+unit)
+				fallbackArgs = append(fallbackArgs, "USER_UNIT="+unit)
+			}
+		}
+		if !a.system {
+			fallbackArgs = append(fallbackArgs, "_UID="+strconv.Itoa(os.Getuid()), "--no-pager")
+		}
+	} else {
+		for _, unit := range units {
+			journalArgs = append(journalArgs, "--unit", unit)
+		}
+		if !a.system {
+			for _, unit := range units {
+				fallbackArgs = append(fallbackArgs, "--user-unit", unit)
+			}
+			fallbackArgs = append(fallbackArgs, "--no-pager")
+		}
 	}
 	journalArgs = append(journalArgs, "--no-pager")
-	var fallbackArgs []string
 	if !a.system {
 		journalArgs = append([]string{"--user"}, journalArgs...)
-		for _, unit := range units {
-			fallbackArgs = append(fallbackArgs, "--user-unit", unit)
-		}
-		fallbackArgs = append(fallbackArgs, "--no-pager")
 	}
 	if options.follow {
 		journalArgs = append(journalArgs, "--follow")
@@ -1772,6 +1801,10 @@ type logsOptions struct {
 	output string
 	boot   bool
 	health bool
+	// spm selects what spm recorded about the services instead of their
+	// output; scheduler selects the scheduler daemon's log.
+	spm       bool
+	scheduler bool
 }
 
 func parseLogs(args []string) (logsOptions, error) {
@@ -1795,6 +1828,15 @@ func parseLogs(args []string) (logsOptions, error) {
 				return options, fmt.Errorf("%s does not accept a value", key)
 			}
 			options.health = true
+		case "--spm", "--scheduler":
+			if hasInlineValue {
+				return options, fmt.Errorf("%s does not accept a value", key)
+			}
+			if key == "--spm" {
+				options.spm = true
+			} else {
+				options.scheduler = true
+			}
 		case "-n", "--lines":
 			value := inlineValue
 			if !hasInlineValue {
@@ -1836,6 +1878,12 @@ func parseLogs(args []string) (logsOptions, error) {
 			}
 			options.names = append(options.names, arg)
 		}
+	}
+	if options.spm && options.scheduler || options.health && (options.spm || options.scheduler) {
+		return options, errors.New("choose only one of --spm, --scheduler and --health")
+	}
+	if options.scheduler && len(options.names) > 0 {
+		return options, errors.New("--scheduler shows the scheduler's own log and takes no service names")
 	}
 	for _, name := range options.names {
 		if name == "all" {

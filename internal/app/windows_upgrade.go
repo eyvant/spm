@@ -84,7 +84,7 @@ func (b *windowsBackend) upgradeScheduler(names []string) []error {
 			if _, err := os.Stat(launcher); err != nil {
 				continue
 			}
-			if err := writeWindowsScheduleLauncher(launcher, executable, b.scheduleRecordPath(name), b.scheduleStateDir(name), b.logPath(name), activation); err != nil {
+			if err := writeWindowsScheduleLauncher(launcher, executable, b.scheduleRecordPath(name), b.scheduleStateDir(name), b.logPath(name), b.eventLogPath(name), activation); err != nil {
 				errs = append(errs, fmt.Errorf("%s: %w", name, err))
 			}
 		}

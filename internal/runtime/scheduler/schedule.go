@@ -534,12 +534,15 @@ func LatestDueOccurrence(record Record, state State, now time.Time, activation s
 	return due, true, nil
 }
 
-func Run(args []string, stdout, stderr io.Writer) error {
-	var configPath, stateDir, logPath, activation string
+// Run performs one scheduled invocation. The command's output goes to --log;
+// what the run did (started, skipped as already done, finished with an exit
+// code, failed) goes to --events, so the two never mix.
+func Run(args []string, stdout, stderr io.Writer) (err error) {
+	var configPath, stateDir, logPath, eventsPath, activation string
 	force := false
 	for index := 0; index < len(args); index++ {
 		switch args[index] {
-		case "--config", "--state-dir", "--log", "--activation":
+		case "--config", "--state-dir", "--log", "--events", "--activation":
 			if index+1 >= len(args) {
 				return fmt.Errorf("%s requires a value", args[index])
 			}
@@ -552,6 +555,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 				stateDir = value
 			case "--log":
 				logPath = value
+			case "--events":
+				eventsPath = value
 			case "--activation":
 				activation = value
 			}
@@ -564,6 +569,17 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	if !filepath.IsAbs(configPath) || !filepath.IsAbs(stateDir) {
 		return errors.New("scheduled runner requires absolute --config and --state-dir paths")
 	}
+	events := common.NewEventLog(stderr)
+	if eventsPath != "" {
+		events = common.OpenEventLog(eventsPath, stderr)
+	}
+	defer events.Close()
+	defer func() {
+		var recorded silentError
+		if err != nil && !errors.As(err, &recorded) {
+			events.Printf("scheduled run failed: %v", err)
+		}
+	}()
 	record, err := ReadRecord(configPath)
 	if err != nil {
 		return fmt.Errorf("read scheduled task: %w", err)
@@ -640,26 +656,50 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer closeOutput()
+	reason := activation
+	if force {
+		reason = "manual"
+	}
+	if reason == "" {
+		reason = "timer"
+	}
+	events.Printf("starting scheduled run (%s): %s", reason, strings.Join(record.Command, " "))
 	command := exec.Command(record.Command[0], record.Command[1:]...)
 	command.Dir = record.Cwd
 	command.Env = scheduledEnvironment(record)
 	command.Stdout, command.Stderr = output, output
-	err = command.Run()
+	runErr := command.Run()
 	exitCode := 0
-	if err != nil {
+	if runErr != nil {
 		exitCode = 1
 		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
+		if errors.As(runErr, &exitError) {
 			exitCode = exitError.ExitCode()
+			events.Printf("scheduled run exited with code %d after %s", exitCode, time.Since(state.LastStartedAt).Round(time.Millisecond))
+		} else {
+			events.Printf("scheduled run could not start: %v", runErr)
 		}
+	} else {
+		events.Printf("scheduled run exited with code 0 after %s", time.Since(state.LastStartedAt).Round(time.Millisecond))
 	}
 	state.LastFinishedAt = time.Now()
 	state.LastExitCode = &exitCode
 	if stateErr := WriteState(statePath, state); stateErr != nil {
-		return errors.Join(err, stateErr)
+		return errors.Join(runErr, stateErr)
 	}
-	return err
+	if runErr != nil {
+		// Already recorded above.
+		return silentError{runErr}
+	}
+	return nil
 }
+
+// silentError is a run failure that has already been written to the event
+// log. It unwraps to the original error, for the exit status.
+type silentError struct{ err error }
+
+func (e silentError) Error() string { return e.err.Error() }
+func (e silentError) Unwrap() error { return e.err }
 
 func AcquireLock(path string) (bool, error) {
 	for attempt := 0; attempt < 2; attempt++ {

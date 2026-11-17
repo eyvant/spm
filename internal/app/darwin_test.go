@@ -12,7 +12,21 @@ import (
 	"testing"
 )
 
+// fakeDarwinRuntimes points runtimeExecutable at empty runtime binaries.
+func fakeDarwinRuntimes(t *testing.T) string {
+	t.Helper()
+	directory := t.TempDir()
+	for _, name := range []string{supervisorRuntime, schedulerRuntime} {
+		if err := os.WriteFile(filepath.Join(directory, name), nil, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("SPM_RUNTIME_DIR", directory)
+	return directory
+}
+
 func TestDarwinWritePlist(t *testing.T) {
+	runtimes := fakeDarwinRuntimes(t)
 	directory := t.TempDir()
 	b := &darwinBackend{root: directory, plistDir: directory, uid: os.Getuid()}
 	config := darwinServiceConfig{
@@ -29,13 +43,19 @@ func TestDarwinWritePlist(t *testing.T) {
 	}
 	text := string(data)
 	for _, expected := range []string{
-		"<string>com.eyvant.spm.api</string>", "<string>&lt;ready&gt;</string>",
+		"<string>com.eyvant.spm.api</string>", "<string>" + filepath.Join(runtimes, supervisorRuntime) + "</string>",
+		"<string>launchd</string>", "<string>" + directory + "</string>\n    <string>api</string>",
 		"<string>API &amp; worker</string>", "<key>SuccessfulExit</key>", "<false/>",
 		"<integer>4</integer>", "<key>MODE</key>", "<string>a&amp;b</string>",
+		"<key>StandardOutPath</key>\n  <string>/dev/null</string>",
 	} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("plist does not contain %q:\n%s", expected, text)
 		}
+	}
+	// The command itself lives in config.json, which the supervisor reads.
+	if strings.Contains(text, "&lt;ready&gt;") || strings.Contains(text, "service.log") {
+		t.Fatalf("plist should run the supervisor, not the command or a log redirect:\n%s", text)
 	}
 }
 
@@ -43,6 +63,7 @@ func TestDarwinXMLAndRestartPolicies(t *testing.T) {
 	if got := darwinXMLEscape(`a<&>"'`); got != "a&lt;&amp;&gt;&quot;&apos;" {
 		t.Fatalf("escape = %q", got)
 	}
+	fakeDarwinRuntimes(t)
 	directory := t.TempDir()
 	b := &darwinBackend{root: directory, plistDir: directory, uid: os.Getuid()}
 	for policy, expected := range map[string]string{"always": "<true/>", "on-success": "<key>SuccessfulExit</key>", "no": ""} {
@@ -67,6 +88,7 @@ func TestDarwinXMLAndRestartPolicies(t *testing.T) {
 }
 
 func TestDarwinThrottleRoundsRestartDelayUp(t *testing.T) {
+	fakeDarwinRuntimes(t)
 	directory := t.TempDir()
 	b := &darwinBackend{root: directory, plistDir: directory, uid: os.Getuid()}
 	config := darwinServiceConfig{Version: 1, Name: "worker", Cwd: directory, Command: []string{"/usr/bin/true"}, Restart: "always", RestartSec: "1500ms"}
@@ -84,8 +106,8 @@ func TestDarwinThrottleRoundsRestartDelayUp(t *testing.T) {
 
 func TestRenderDarwinSchedulePlistUsesPortableRunner(t *testing.T) {
 	config := darwinServiceConfig{Name: "backup", Description: "Nightly & safe", Enabled: true, Schedule: "*/5 * * * *"}
-	plist := renderDarwinSchedulePlist(config, "com.eyvant.spm.backup", "/usr/local/bin/spm", "/tmp/schedule.json", "/tmp/state", "/tmp/task.log", "timer", false)
-	for _, want := range []string{"<key>StartInterval</key>", "<integer>60</integer>", "<string>run</string>", "Nightly &amp; safe", "<string>timer</string>"} {
+	plist := renderDarwinSchedulePlist(config, "com.eyvant.spm.backup", "/usr/local/bin/spm", "/tmp/schedule.json", "/tmp/state", "/tmp/service.log", "/tmp/spm.log", "timer", false)
+	for _, want := range []string{"<key>StartInterval</key>", "<integer>60</integer>", "<string>run</string>", "Nightly &amp; safe", "<string>timer</string>", "<string>--events</string>\n    <string>/tmp/spm.log</string>", "<key>StandardOutPath</key>\n  <string>/dev/null</string>"} {
 		if !strings.Contains(plist, want) {
 			t.Errorf("schedule plist does not contain %q:\n%s", want, plist)
 		}
@@ -94,7 +116,7 @@ func TestRenderDarwinSchedulePlistUsesPortableRunner(t *testing.T) {
 
 func TestRenderDarwinDaemonExecutorHasNoPollingInterval(t *testing.T) {
 	config := darwinServiceConfig{Name: "backup", Enabled: true, Schedule: "30 0 4 * * *"}
-	plist := renderDarwinSchedulePlist(config, "com.eyvant.spm.backup", "/usr/local/bin/spm", "/tmp/schedule.json", "/tmp/state", "/tmp/task.log", "daemon", false)
+	plist := renderDarwinSchedulePlist(config, "com.eyvant.spm.backup", "/usr/local/bin/spm", "/tmp/schedule.json", "/tmp/state", "/tmp/service.log", "/tmp/spm.log", "daemon", false)
 	if !strings.Contains(plist, "<string>run</string>") || !strings.Contains(plist, "<string>daemon</string>") {
 		t.Fatalf("unexpected daemon executor plist:\n%s", plist)
 	}
@@ -104,8 +126,8 @@ func TestRenderDarwinDaemonExecutorHasNoPollingInterval(t *testing.T) {
 }
 
 func TestRenderDarwinScheduleDaemon(t *testing.T) {
-	plist := renderDarwinScheduleDaemonPlist("com.eyvant.spm.scheduler", "/usr/local/bin/spm", "/tmp/spm", "gui/501", "/tmp/scheduler.log")
-	for _, want := range []string{"<string>daemon</string>", "<key>RunAtLoad</key>", "<key>KeepAlive</key>", "<string>gui/501</string>"} {
+	plist := renderDarwinScheduleDaemonPlist("com.eyvant.spm.scheduler", "/usr/local/bin/spm", "/tmp/spm", "gui/501")
+	for _, want := range []string{"<string>daemon</string>", "<key>RunAtLoad</key>", "<key>KeepAlive</key>", "<string>gui/501</string>", "<key>StandardOutPath</key>\n  <string>/dev/null</string>"} {
 		if !strings.Contains(plist, want) {
 			t.Errorf("scheduler plist does not contain %q:\n%s", want, plist)
 		}
@@ -125,6 +147,7 @@ func TestDarwinScheduledDeclarationIsPortable(t *testing.T) {
 }
 
 func TestDarwinLocalManagementAndReporting(t *testing.T) {
+	fakeDarwinRuntimes(t)
 	root := t.TempDir()
 	plists := filepath.Join(root, "plists")
 	var output bytes.Buffer
@@ -170,6 +193,26 @@ func TestDarwinLocalManagementAndReporting(t *testing.T) {
 	}
 	if got := output.String(); !strings.Contains(got, "match this") || strings.Contains(got, "last") {
 		t.Fatalf("filtered logs: %q", got)
+	}
+	if err := os.WriteFile(b.eventLogPath("api"), []byte("[2026-01-01T00:00:00Z] starting /usr/bin/true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b.schedulerLogPath(), []byte("[2026-01-01T00:00:00Z] scheduler 7 started\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := b.logs([]string{"--spm", "api"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "starting /usr/bin/true") || strings.Contains(got, "match this") {
+		t.Fatalf("spm logs: %q", got)
+	}
+	output.Reset()
+	if err := b.logs([]string{"--scheduler"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "scheduler 7 started") {
+		t.Fatalf("scheduler logs: %q", got)
 	}
 	for _, args := range [][]string{{"list", "--json"}, {"status", "api"}, {"logs", "--lines", "1", "api"}, {"doctor"}} {
 		if err := b.run(args); err != nil {

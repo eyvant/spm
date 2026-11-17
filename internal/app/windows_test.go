@@ -107,7 +107,7 @@ func TestRenderWindowsScheduleDaemonStartsAtScopeActivation(t *testing.T) {
 
 func TestWriteWindowsScheduleLauncherHidesRunner(t *testing.T) {
 	path := filepath.Join(localTempDir(t), "schedule-timer.vbs")
-	if err := writeWindowsScheduleLauncher(path, `C:\Program Files\spm\spm.exe`, `C:\data\schedule.json`, `C:\data\state`, `C:\data\task.log`, "timer"); err != nil {
+	if err := writeWindowsScheduleLauncher(path, `C:\Program Files\spm\spm.exe`, `C:\data\schedule.json`, `C:\data\state`, `C:\data\service.log`, `C:\data\spm.log`, "timer"); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
@@ -115,7 +115,7 @@ func TestWriteWindowsScheduleLauncherHidesRunner(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := string(data)
-	for _, want := range []string{`shell.Run(`, `, 0, True)`, `""run""`, `"C:\Program Files\spm\spm.exe"`, `--activation`, `timer`} {
+	for _, want := range []string{`shell.Run(`, `, 0, True)`, `""run""`, `"C:\Program Files\spm\spm.exe"`, `""--events"" ""C:\data\spm.log""`, `--activation`, `timer`} {
 		if !strings.Contains(script, want) {
 			t.Errorf("launcher does not contain %q:\n%s", want, script)
 		}
@@ -356,7 +356,7 @@ func TestWindowsSelectionStatusAndLogsValidation(t *testing.T) {
 			t.Errorf("status output missing %q:\n%s", want, output.String())
 		}
 	}
-	if err := b.logs([]string{"backup", "--health"}); err == nil || !strings.Contains(err.Error(), "windows logs") {
+	if err := b.logs([]string{"backup", "--health"}); err == nil || !strings.Contains(err.Error(), "Windows logs support") {
 		t.Fatalf("unsupported logs error = %v", err)
 	}
 	if err := b.status("missing"); err == nil || !strings.Contains(err.Error(), "not managed") {
@@ -518,7 +518,7 @@ func TestWindowsSupervisorAndWaitFailurePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := &windowsBackend{root: root, stdout: io.Discard, stderr: io.Discard}
-	config := windowsServiceConfig{Version: windowsStateVersion, Name: "once", Cwd: root, Command: []string{"cmd.exe", "/d", "/c", "exit", "0"}, Restart: "no", RestartSec: "0s"}
+	config := windowsServiceConfig{Version: windowsStateVersion, Name: "once", Cwd: root, Command: []string{"cmd.exe", "/d", "/c", "echo service-output& exit 0"}, Restart: "no", RestartSec: "0s"}
 	if err := b.writeConfig(config); err != nil {
 		t.Fatal(err)
 	}
@@ -529,9 +529,19 @@ func TestWindowsSupervisorAndWaitFailurePaths(t *testing.T) {
 	if state.Status != "stopped" || state.ExitCode == nil || *state.ExitCode != 0 || state.SupervisorPID != 0 {
 		t.Fatalf("completed supervisor state = %#v", state)
 	}
-	log, err := os.ReadFile(b.logPath("once"))
+	// The service's output and the supervisor's records go to separate logs.
+	log, err := os.ReadFile(b.eventLogPath("once"))
 	if err != nil || !strings.Contains(string(log), "process exited with code 0") {
 		t.Fatalf("supervisor log = %q, %v", log, err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(log)), "\n") {
+		if !strings.HasPrefix(line, "[") {
+			t.Fatalf("service output leaked into the supervisor log: %q", log)
+		}
+	}
+	output, err := os.ReadFile(b.logPath("once"))
+	if err != nil || strings.TrimSpace(string(output)) != "service-output" {
+		t.Fatalf("service log = %q, %v", output, err)
 	}
 
 	failed := windowsServiceState{Version: windowsStateVersion, Name: "failed", Status: "failed", Error: "boom"}

@@ -142,7 +142,7 @@ func (b *windowsBackend) runScheduledTask(name string, force bool) error {
 	if err != nil {
 		return err
 	}
-	args := []string{"run", "--config", b.scheduleRecordPath(name), "--state-dir", b.scheduleStateDir(name), "--log", b.logPath(name), "--activation", "timer"}
+	args := []string{"run", "--config", b.scheduleRecordPath(name), "--state-dir", b.scheduleStateDir(name), "--log", b.logPath(name), "--events", b.eventLogPath(name), "--activation", "timer"}
 	if force {
 		args = append(args, "--force")
 	}
@@ -163,7 +163,7 @@ func (b *windowsBackend) registerScheduledTask(config windowsServiceConfig) erro
 	}
 	if config.Schedule != "" || config.TimerInterval != "" {
 		launcher := b.scheduleLauncherPath(config.Name, "daemon")
-		if err := writeWindowsScheduleLauncher(launcher, executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), "daemon"); err != nil {
+		if err := writeWindowsScheduleLauncher(launcher, executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), b.eventLogPath(config.Name), "daemon"); err != nil {
 			return err
 		}
 		_ = os.Remove(b.scheduleLauncherPath(config.Name, "timer"))
@@ -177,7 +177,7 @@ func (b *windowsBackend) registerScheduledTask(config windowsServiceConfig) erro
 	}
 	if config.TimerOnBoot != "" {
 		launcher := b.scheduleLauncherPath(config.Name, "boot")
-		if err := writeWindowsScheduleLauncher(launcher, executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), "boot"); err != nil {
+		if err := writeWindowsScheduleLauncher(launcher, executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), b.eventLogPath(config.Name), "boot"); err != nil {
 			return err
 		}
 		xml := renderWindowsScheduleTask(config, launcher, principal, logonType, "boot", b.system)
@@ -214,8 +214,8 @@ func (b *windowsBackend) scheduledTaskPrincipal(runAs string) (string, string, e
 	}
 }
 
-func writeWindowsScheduleLauncher(path, executable, recordPath, stateDir, logPath, activation string) error {
-	arguments := []string{"run", "--config", recordPath, "--state-dir", stateDir, "--log", logPath, "--activation", activation}
+func writeWindowsScheduleLauncher(path, executable, recordPath, stateDir, logPath, eventsPath, activation string) error {
+	arguments := []string{"run", "--config", recordPath, "--state-dir", stateDir, "--log", logPath, "--events", eventsPath, "--activation", activation}
 	command := windowsQuoteCommand(executable)
 	for _, value := range arguments {
 		command += " " + windowsQuoteCommand(value)

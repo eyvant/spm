@@ -240,9 +240,12 @@ State writes must be atomic. Stale locks are reclaimed after the owning process
 exits. Removing a task removes its scheduling state; disabling a task preserves
 state so re-enabling it does not reset interval or deduplication history.
 
-On Windows and macOS, both scheduled command output (`service.log`) and daemon
-diagnostics (`scheduler.log`) rotate at 10 MiB. SPM retains five numbered
-backups and enforces the limit during writes, not only when a task starts.
+On Windows and macOS, a run writes the command's output to the task's
+`service.log` and its own records (started, exit code, failure) to the task's
+`spm.log`; the daemon writes `scheduler.log`. All three rotate at 10 MiB. SPM
+retains five numbered backups and enforces the limit during writes, not only
+when a task starts. `spm logs --spm NAME` and `spm logs --scheduler` read the
+records.
 
 ## Lifecycle behavior
 

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -11,6 +12,10 @@ import (
 
 func main() {
 	if err := supervisor.Main(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		var status supervisor.ExitStatus
+		if errors.As(err, &status) {
+			os.Exit(status.Code)
+		}
 		fmt.Fprintf(os.Stderr, "spm-supervisor: %v\n", err)
 		os.Exit(1)
 	}

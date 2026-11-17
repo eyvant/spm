@@ -65,15 +65,17 @@ EOF
 chmod 0755 "${fixture_dir}/payload/spm"
 payload_files=spm
 if [ "$platform" = macos ]; then
-  cat > "${fixture_dir}/payload/spm-scheduler" <<'EOF'
+  for runtime in spm-scheduler spm-supervisor; do
+    cat > "${fixture_dir}/payload/${runtime}" <<EOF
 #!/bin/sh
-case "${1:-}" in
-  version) printf 'spm-scheduler 1\n' ;;
+case "\${1:-}" in
+  version) printf '${runtime} 1\\n' ;;
   *) exit 2 ;;
 esac
 EOF
-  chmod 0755 "${fixture_dir}/payload/spm-scheduler"
-  payload_files="spm spm-scheduler"
+    chmod 0755 "${fixture_dir}/payload/${runtime}"
+  done
+  payload_files="spm spm-scheduler spm-supervisor"
 fi
 # shellcheck disable=SC2086
 tar -czf "${fixture_dir}/${archive}" -C "${fixture_dir}/payload" $payload_files
@@ -129,8 +131,10 @@ export SPM_TEST_UPGRADE_MARKER=$upgrade_marker
 [ ! -e "$upgrade_marker" ] || fail "a fresh install restarted spm processes"
 if [ "$platform" = macos ]; then
   cmp -s "${install_dir}/spm-scheduler" "${fixture_dir}/payload/spm-scheduler" || fail "spm-scheduler was not installed"
+  cmp -s "${install_dir}/spm-supervisor" "${fixture_dir}/payload/spm-supervisor" || fail "spm-supervisor was not installed"
 else
   [ ! -e "${install_dir}/spm-scheduler" ] || fail "Linux install added spm-scheduler"
+  [ ! -e "${install_dir}/spm-supervisor" ] || fail "Linux install added spm-supervisor"
 fi
 
 # Same scheduler file: upgrading the CLI restarts nothing.
@@ -154,6 +158,21 @@ if [ "$platform" = macos ]; then
   sh "$installer" --version 9.8.7 --completion zsh --no-restart
   [ ! -e "$upgrade_marker" ] || fail "--no-restart still restarted spm processes"
   [ -x "${install_dir}/spm-scheduler" ] || fail "--no-restart did not install spm-scheduler"
+
+  # A different supervisor file is replaced and running services switch to
+  # it in place, which is not a restart, so --no-restart does not prevent it.
+  printf '# previous build\n' >> "${install_dir}/spm-supervisor"
+  sh "$installer" --version 9.8.7 --completion zsh --no-restart
+  grep -qx "__upgrade-runtime --supervisor" "$upgrade_marker" || fail "upgrade did not move services onto a changed spm-supervisor"
+  cmp -s "${install_dir}/spm-supervisor" "${fixture_dir}/payload/spm-supervisor" || fail "upgrade did not replace a changed spm-supervisor"
+  rm -f "$upgrade_marker"
+
+  # Both runtimes changed: one call moves everything.
+  printf '# previous build\n' >> "${install_dir}/spm-supervisor"
+  printf '# previous build\n' >> "${install_dir}/spm-scheduler"
+  sh "$installer" --version 9.8.7 --completion zsh
+  grep -qx "__upgrade-runtime --supervisor --scheduler" "$upgrade_marker" || fail "upgrade did not move services and jobs onto both runtimes"
+  rm -f "$upgrade_marker"
 fi
 grep -q "test completion for zsh" "${test_home}/.zfunc/_spm" || fail "zsh completion was not installed"
 

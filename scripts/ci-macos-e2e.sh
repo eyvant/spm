@@ -2,10 +2,24 @@
 set -Eeuo pipefail
 
 [[ $# -eq 2 ]] || { echo "usage: $0 PATH-TO-SPM user|system" >&2; exit 2; }
-SPM=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+SOURCE_DIR=$(cd "$(dirname "$1")" && pwd)
+SOURCE_SPM=$SOURCE_DIR/$(basename "$1")
 SCOPE=$2
 [[ $SCOPE == user || $SCOPE == system ]] || { echo "invalid scope: $SCOPE" >&2; exit 2; }
 PREFIX=$(printf '%s-%s' "${SPM_CI_PREFIX:-ci-$$}" "$SCOPE" | tr '[:upper:]_' '[:lower:]-')
+# Each scope runs its own copy of spm and its runtimes, so replacing
+# spm-supervisor for the upgrade test does not touch the other scope, which
+# runs in parallel.
+BIN_DIR=${RUNNER_TEMP:-/tmp}/$PREFIX-bin
+rm -rf "$BIN_DIR"
+mkdir -p "$BIN_DIR"
+cp "$SOURCE_SPM" "$BIN_DIR/spm"
+for runtime in spm-scheduler spm-supervisor spm-supervisor-next; do
+  if [[ -f $SOURCE_DIR/$runtime ]]; then
+    cp "$SOURCE_DIR/$runtime" "$BIN_DIR/$runtime"
+  fi
+done
+SPM=$BIN_DIR/spm
 MAIN=$PREFIX-main
 DEPENDENCY=$PREFIX-dependency
 DEPENDENT=$PREFIX-dependent
@@ -13,6 +27,8 @@ DECLARED=$PREFIX-declared
 SCHEDULE=$PREFIX-scheduled
 SCHEDULE_DECLARED=$PREFIX-scheduled-declared
 ROTATION=$PREFIX-log-rotation
+SERVICE_ROTATION=$PREFIX-service-log-rotation
+TICKER=$PREFIX-ticker
 HOT_JOB=$PREFIX-hot-job
 STEADY=$PREFIX-steady
 HOT_MARKER=${RUNNER_TEMP:-/tmp}/$PREFIX-hot-marker.log
@@ -47,7 +63,7 @@ diagnose() {
 cleanup() {
   trap - ERR
   set +e
-  for name in "$HOT_JOB" "$STEADY" "$CRASHING" "$ROTATION" "$SCHEDULE_DECLARED" "$SCHEDULE" "$DEPENDENT" "$DEPENDENCY" "$DECLARED" "$MAIN"; do
+  for name in "$TICKER" "$SERVICE_ROTATION" "$HOT_JOB" "$STEADY" "$CRASHING" "$ROTATION" "$SCHEDULE_DECLARED" "$SCHEDULE" "$DEPENDENT" "$DEPENDENCY" "$DECLARED" "$MAIN"; do
     command_spm stop "$name" >/dev/null 2>&1
     command_spm delete --yes "$name" >/dev/null 2>&1
   done
@@ -90,6 +106,9 @@ if [[ ${SPM_CI_E2E_MODE:-full} == full ]]; then
   command_spm "${start_args[@]}"
   wait_running "$MAIN"
   wait_log "$MAIN" "$MARKER"
+  # What spm records about the service is kept apart from its output.
+  command_spm logs --spm "$MAIN" | grep -F 'starting /bin/sh -c'
+  ! command_spm logs --spm "$MAIN" | grep -Fx "$MARKER"
   command_spm native launchd print "$MAIN" | grep -F "com.eyvant.spm.$MAIN"
 
   PID_BEFORE=$(command_spm status "$MAIN" | awk '$1 == "pid" { print $2 }')
@@ -241,6 +260,36 @@ done
 command_spm status "$HOT_JOB" | grep -Eq '^last exit code[[:space:]]+0$'
 command_spm stop "$HOT_JOB" >/dev/null 2>&1 || true
 command_spm delete --yes "$HOT_JOB" "$STEADY"
+# The scheduler daemon timestamps its own log.
+command_spm logs --scheduler | grep -E '^\[[0-9T:+-]+Z?\] scheduler [0-9]+ \(build [0-9a-f]+\) started'
+
+echo "==> macOS $SCOPE supervisor upgrade keeps the service and its output"
+command_spm start --name "$TICKER" --no-enable --restart no --cwd /tmp ${run_as[@]+"${run_as[@]}"} \
+  -- /bin/sh -c 'i=0; while true; do i=$((i + 1)); echo "tick $i"; sleep 0.5; done'
+wait_running "$TICKER"
+wait_log "$TICKER" 'tick 2'
+TICKER_PID=$(command_spm status "$TICKER" | awk '$1 == "pid" { print $2 }')
+TICKER_SUPERVISOR=$(launchd_pid "com.eyvant.spm.$TICKER")
+# launchd runs spm-supervisor; status reports the service process below it.
+[[ -n $TICKER_PID && -n $TICKER_SUPERVISOR && $TICKER_PID != "$TICKER_SUPERVISOR" ]]
+ps -o command= -p "$TICKER_SUPERVISOR" | grep -F 'spm-supervisor launchd'
+if [[ -f $BIN_DIR/spm-supervisor-next ]]; then
+  cp "$BIN_DIR/spm-supervisor-next" "$BIN_DIR/spm-supervisor.new"
+  mv -f "$BIN_DIR/spm-supervisor.new" "$BIN_DIR/spm-supervisor"
+  command_spm __upgrade-runtime --supervisor | tee /dev/stderr | grep -F "$TICKER switched to the new supervisor (kept running)"
+  [[ $(command_spm status "$TICKER" | awk '$1 == "pid" { print $2 }') == "$TICKER_PID" ]] || { echo "$TICKER was restarted" >&2; false; }
+  [[ $(launchd_pid "com.eyvant.spm.$TICKER") == "$TICKER_SUPERVISOR" ]] || { echo "launchd saw the supervisor exit" >&2; false; }
+  command_spm logs --spm "$TICKER" | grep -F "took over running process $TICKER_PID"
+  LAST_TICK=$(command_spm logs --lines 1 "$TICKER")
+  for _ in {1..20}; do
+    [[ $(command_spm logs --lines 1 "$TICKER") != "$LAST_TICK" ]] && break
+    sleep 0.25
+  done
+  [[ $(command_spm logs --lines 1 "$TICKER") != "$LAST_TICK" ]] || { echo "output stopped after the supervisor upgrade" >&2; false; }
+fi
+command_spm stop "$TICKER"
+command_spm logs --spm "$TICKER" | grep -F "passing SIGTERM on to process $TICKER_PID"
+command_spm delete --yes "$TICKER"
 
 echo "==> macOS $SCOPE declarative scheduled task"
 cat >"$SCHEDULE_TOML" <<EOF
@@ -279,11 +328,26 @@ else
   test "$(stat -f %z "$ROTATION_LOG.1")" -eq $((10 * 1024 * 1024))
   test "$(stat -f %z "$ROTATION_LOG")" -eq $((1024 * 1024))
 fi
+command_spm logs --spm "$ROTATION" | grep -F 'scheduled run exited with code 0'
+
+echo "==> macOS $SCOPE service log rotation"
+command_spm start --name "$SERVICE_ROTATION" --no-enable --restart no ${run_as[@]+"${run_as[@]}"} \
+  -- /bin/sh -c 'dd if=/dev/zero bs=1048576 count=11 2>/dev/null; exec /bin/sleep 60'
+SERVICE_ROTATION_LOG="$DATA_ROOT/services/$SERVICE_ROTATION/service.log"
+file_size() { if [[ $SCOPE == system ]]; then sudo stat -f %z "$1" 2>/dev/null; else stat -f %z "$1" 2>/dev/null; fi; }
+for _ in {1..40}; do
+  [[ $(file_size "$SERVICE_ROTATION_LOG") == $((1024 * 1024)) ]] && break
+  sleep 0.25
+done
+test "$(file_size "$SERVICE_ROTATION_LOG.1")" -eq $((10 * 1024 * 1024))
+test "$(file_size "$SERVICE_ROTATION_LOG")" -eq $((1024 * 1024))
+command_spm delete --yes "$SERVICE_ROTATION"
 
 cleanup
-for name in "$MAIN" "$DEPENDENCY" "$DEPENDENT" "$DECLARED" "$SCHEDULE" "$SCHEDULE_DECLARED" "$ROTATION" "$CRASHING"; do
+for name in "$MAIN" "$DEPENDENCY" "$DEPENDENT" "$DECLARED" "$SCHEDULE" "$SCHEDULE_DECLARED" "$ROTATION" "$SERVICE_ROTATION" "$TICKER" "$CRASHING"; do
   test ! -e "$PLIST_DIR/com.eyvant.spm.$name.plist"
   test ! -e "$PLIST_DIR/com.eyvant.spm.$name.boot.plist"
 done
 test ! -e "$PLIST_DIR/com.eyvant.spm.scheduler.plist"
+rm -rf "$BIN_DIR"
 echo "spm macOS $SCOPE integration passed"

@@ -181,7 +181,7 @@ func completionOptions(command string) []string {
 	case "schedule":
 		return scheduleCompletionOptions
 	case "logs":
-		return []string{"--follow", "-f", "--lines", "-n", "--since", "--until", "--grep", "--boot", "--health", "--output", "-o", "--help", "-h"}
+		return []string{"--follow", "-f", "--lines", "-n", "--since", "--until", "--grep", "--boot", "--health", "--spm", "--scheduler", "--output", "-o", "--help", "-h"}
 	case "list", "ls", "status-all":
 		return []string{"--json", "--watch", "-w", "--help", "-h"}
 	case "signal", "kill":

@@ -154,6 +154,8 @@ func TestMCPFocusedToolValidation(t *testing.T) {
 	}{
 		{"spm_create_service", `{}`},
 		{"spm_get_logs", `{"lines":1001}`},
+		{"spm_get_logs", `{"source":"kernel"}`},
+		{"spm_get_logs", `{"source":"scheduler","names":["api"]}`},
 		{"spm_show_service", `{"name":"api"} {}`},
 		{"missing", `{}`},
 	}

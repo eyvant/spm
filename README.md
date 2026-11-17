@@ -101,7 +101,7 @@ small runtimes installed next to it:
 
 | Runtime | Platforms | Runs |
 | --- | --- | --- |
-| `spm-supervisor` | Windows | every service (systemd and launchd supervise services elsewhere) |
+| `spm-supervisor` | Windows, macOS | every service, and its log files (systemd and journald do this on Linux) |
 | `spm-scheduler` | Windows, macOS | the scheduler daemon and every scheduled-job run |
 
 Release builds of the runtimes are reproducible, and the installer replaces a
@@ -114,11 +114,13 @@ When a runtime does change:
 - **`spm-scheduler`:** the scheduler daemon is restarted. Services are not
   touched, and a job that is running finishes normally; its next run uses the
   new version.
-- **`spm-supervisor`:** each running service is handed over to the new
-  supervisor without being stopped. The old supervisor detaches and leaves the
-  process running; the new one adopts it, keeping its start time and restart
-  count. For system services the installer asks for Administrator approval
-  once.
+- **`spm-supervisor`:** each running service moves to the new supervisor
+  without being stopped, and its output keeps flowing into the same log. On
+  Windows the old supervisor detaches and leaves the process running, and the
+  new one adopts it and its output pipe, keeping its start time and restart
+  count. On macOS the supervisor replaces itself with the new binary in place:
+  launchd sees the same process, and the service stays its child. For system
+  services the installer asks for Administrator approval or `sudo` once.
 
   An upgrade never restarts a service on its own. A service that cannot be
   handed over (for example one still running on the supervisor from spm 0.3.6
@@ -128,9 +130,11 @@ When a runtime does change:
   fails to start, the previous one takes the service back. Pass
   `-RestartServices` to restart services that cannot be handed over instead.
 
-On macOS, system jobs need `sudo`. Linux needs neither runtime. Pass
-`-NoRestart` (Windows) or `--no-restart` (macOS) to keep running processes on
-the previous runtime until you restart them yourself.
+On macOS, system services and jobs need `sudo`. Linux needs neither runtime.
+Pass `-NoRestart` (Windows) or `--no-restart` (macOS) to keep running processes
+on the previous runtime until you restart them yourself; on macOS this applies
+to the scheduler only, since moving a service to a new supervisor does not
+restart it.
 
 Or install from source with Go 1.27 or later (the runtimes must sit next to
 `spm`, which `go install` does):
@@ -165,11 +169,12 @@ On Linux, that one command:
 
 On Windows it creates an equivalent user service: a detached supervisor owns
 the process and its restart policy, a hidden Startup shortcut launches enabled
-services at logon, and output is written below
-`%APPDATA%\spm\services\NAME`.
+services at logon, and logs are written below `%APPDATA%\spm\services\NAME`.
 
-On macOS it creates a LaunchAgent in `~/Library/LaunchAgents`; output and saved
-configuration live under the user's Application Support directory.
+On macOS it creates a LaunchAgent in `~/Library/LaunchAgents` that runs the
+command through `spm-supervisor`; logs and saved configuration live under the
+user's Application Support directory. See [Logs](#logs) for what is written
+where.
 
 ## User and system services
 
@@ -344,11 +349,36 @@ spm logs api --since 1h --grep ERROR
 spm logs api --boot --output json
 ```
 
-Windows/macOS scheduled-task output (`service.log`) and scheduler diagnostics
-(`scheduler.log`) rotate at 10 MiB and retain five backups (`.1` through `.5`).
-Rotation is applied while data is being written, including during one
-long-running scheduled invocation. Linux log capacity remains controlled by
-journald.
+`spm logs` shows what the services wrote. `--spm` shows what spm recorded about
+them instead: when each run started, how it ended and with which exit code,
+restarts, scheduled runs, and supervisor upgrades. Use it when a service
+stopped or restarted and its own output does not say why.
+
+```bash
+spm logs --spm api           # starts, exits and exit codes of api
+spm logs --spm               # the same for every service, one name per line
+spm logs --scheduler         # the spm scheduler itself (Windows, macOS)
+```
+
+On Linux, journald keeps everything: a service's output is its unit's journal,
+`--spm` selects systemd's own messages about the unit, and journald's settings
+decide how much is kept. There is no spm scheduler on Linux; systemd timers run
+scheduled jobs.
+
+On Windows and macOS spm keeps three kinds of log files in the data directory
+(`%APPDATA%\spm`, `%ProgramData%\spm`, `~/Library/Application Support/spm` or
+`/Library/Application Support/spm`):
+
+| File | Contents | Written by |
+| --- | --- | --- |
+| `services/NAME/service.log` | the service's stdout and stderr, as written | `spm-supervisor`, or `spm-scheduler` for a scheduled job |
+| `services/NAME/spm.log` | timestamped records of starts, exits, restarts, scheduled runs and supervisor upgrades | `spm-supervisor`, `spm-scheduler` |
+| `scheduler.log` | the scheduler daemon's own timestamped log | `spm-scheduler` |
+
+Every file rotates at 10 MiB and keeps five backups (`.1` through `.5`).
+Rotation happens while data is written, also during a long-running service or
+scheduled run, because the service writes into a pipe and spm writes the file.
+`spm status NAME` shows both paths of a service.
 
 ### Change an existing service
 
@@ -926,6 +956,9 @@ spm is available under the [MIT License](LICENSE).
   LocalService, or NetworkService. macOS supports the common lifecycle, logs,
   declarations, restart policies, readiness checks, dependencies, and both
   LaunchAgent and LaunchDaemon scopes.
+- On Windows and macOS, `spm logs` reads spm's own log files and supports
+  service names, `--lines`, `--follow`, `--grep`, `--spm` and `--scheduler`,
+  but not `--since`, `--until`, `--boot` or `--output`.
 - Cross-platform schedules use native activation plus shared SPM semantics;
   see [the scheduling design](docs/cross-platform-scheduling.md).
 - PM2 cluster-mode socket sharing, watch mode, deployment, and remote management are not implemented.

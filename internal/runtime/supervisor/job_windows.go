@@ -7,11 +7,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -112,12 +113,18 @@ func ProcessInJob(process, job windows.Handle) bool {
 }
 
 // child is a supervised process, started here or adopted from a previous
-// supervisor.
+// supervisor, with the read end of its output pipe.
 type child struct {
 	pid     int
 	process windows.Handle
 	job     windows.Handle
 	done    chan uint32
+
+	output windows.Handle
+	sink   io.Writer
+	halt   chan struct{}
+	drain  chan struct{}
+	pumped chan bool
 }
 
 func newChild(pid int, process, job windows.Handle) *child {
@@ -132,21 +139,31 @@ func newChild(pid int, process, job windows.Handle) *child {
 	return c
 }
 
-func startChild(l Layout, name string, config Config, log *os.File) (*child, error, error) {
+func startChild(l Layout, name string, config Config) (*child, error, error) {
+	read, write, err := newOutputPipe()
+	if err != nil {
+		return nil, nil, err
+	}
 	cmd := exec.Command(config.Command[0], config.Command[1:]...)
 	cmd.Dir = config.Cwd
 	cmd.Env = Environment(config)
-	cmd.Stdout, cmd.Stderr = log, log
+	cmd.Stdout, cmd.Stderr = write, write
 	cmd.Stdin = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if err := cmd.Start(); err != nil {
-		return nil, nil, err
+	startErr := cmd.Start()
+	// The child has its own copy now; closing this one lets the pipe break
+	// once the child and everything it started have exited.
+	_ = write.Close()
+	if startErr != nil {
+		_ = windows.CloseHandle(read)
+		return nil, nil, startErr
 	}
 	pid := cmd.Process.Pid
 	process, err := windows.OpenProcess(processAccess, false, uint32(pid))
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
+		_ = windows.CloseHandle(read)
 		return nil, nil, fmt.Errorf("open started process: %w", err)
 	}
 	// The handle opened above is used from here on.
@@ -158,7 +175,9 @@ func startChild(l Layout, name string, config Config, log *os.File) (*child, err
 			job, jobErr = 0, err
 		}
 	}
-	return newChild(pid, process, job), jobErr, nil
+	started := newChild(pid, process, job)
+	started.output = read
+	return started, jobErr, nil
 }
 
 // errNothingToAdopt means there is no detached process to take over: no
@@ -215,8 +234,72 @@ func (c *child) kill() {
 	_ = windows.TerminateProcess(c.process, 1)
 }
 
+// startPump starts copying the output pipe into dst, or into the previous
+// destination when dst is nil.
+func (c *child) startPump(dst io.Writer) {
+	if dst != nil {
+		c.sink = dst
+	}
+	if c.output == 0 || c.sink == nil || c.pumped != nil {
+		return
+	}
+	halt, drain, pumped := make(chan struct{}), make(chan struct{}), make(chan bool, 1)
+	c.halt, c.drain, c.pumped = halt, drain, pumped
+	output, sink := c.output, c.sink
+	go func() { pumped <- pumpOutput(output, sink, halt, drain) }()
+}
+
+// stopPump stops copying and returns once no read is in flight.
+func (c *child) stopPump() {
+	if c.pumped == nil {
+		return
+	}
+	close(c.halt)
+	<-c.pumped
+	c.pumped = nil
+}
+
+// finishOutput copies what the exited process left in the pipe and closes
+// it. Output that processes it started keep writing is dropped after a
+// short grace period.
+func (c *child) finishOutput() {
+	if c.pumped != nil {
+		close(c.drain)
+		select {
+		case <-c.pumped:
+		case <-time.After(2 * time.Second):
+			close(c.halt)
+			<-c.pumped
+		}
+		c.pumped = nil
+	}
+	if c.output != 0 {
+		_ = windows.CloseHandle(c.output)
+		c.output = 0
+	}
+}
+
+// handOutput stops copying output and leaves the pipe with an output holder
+// for the next supervisor, recording where it is in state. A process without
+// an output pipe has nothing to pass.
+func (c *child) handOutput(l Layout, name string, state *State) error {
+	if c.output == 0 {
+		return nil
+	}
+	c.stopPump()
+	holder, handle, err := spawnOutputHolder(l, name, c.output, c.pid)
+	if err != nil {
+		return err
+	}
+	_ = windows.CloseHandle(c.output)
+	c.output = 0
+	state.OutputHandle, state.OutputHolder = handle, holder
+	return nil
+}
+
 // close releases the handles of a process that has exited.
 func (c *child) close() {
+	c.finishOutput()
 	if c.job != 0 {
 		_ = windows.CloseHandle(c.job)
 		c.job = 0
@@ -236,9 +319,11 @@ func (c *child) release() {
 var errNotRunning = errors.New("service is not running")
 
 // Detach asks the running supervisor of a service to exit and leave its
-// process running, for a supervisor upgrade. The caller must hold the job
-// (HoldJob) until the next supervisor has adopted the process; otherwise
-// the process is terminated when the old supervisor exits.
+// process running, for a supervisor upgrade. The supervisor leaves the
+// service's output pipe with an output holder (see spawnOutputHolder). The
+// caller must hold the job (HoldJob) until the next supervisor has adopted
+// the process; otherwise the process is terminated when the old supervisor
+// exits.
 func Detach(l Layout, name string) error {
 	state := l.ReadState(name)
 	if state.SupervisorPID <= 0 || state.PID <= 0 {

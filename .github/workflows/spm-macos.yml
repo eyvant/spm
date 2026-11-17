@@ -65,6 +65,11 @@ jobs:
         run: |
           go build -cover -covermode=atomic -buildvcs=false -o spm-ci ./cmd/spm
           go build -cover -covermode=atomic -buildvcs=false -o spm-scheduler ./cmd/spm-scheduler
+          go build -cover -covermode=atomic -buildvcs=false -o spm-supervisor ./cmd/spm-supervisor
+          # A second, otherwise identical supervisor build with another build
+          # ID, for the supervisor upgrade test.
+          go build -cover -covermode=atomic -buildvcs=false -ldflags=-buildid=spm-ci-next -o spm-supervisor-next ./cmd/spm-supervisor
+          cmp -s spm-supervisor spm-supervisor-next && { echo "the two supervisor builds are identical" >&2; exit 1; } || true
 
       - name: Prepare E2E coverage directory
         run: |

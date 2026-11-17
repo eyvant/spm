@@ -69,6 +69,7 @@ same `--name` and `--force`.
 | List services and their state | `spm list` (`--json` for machine-readable) |
 | Details for one service | `spm show NAME` |
 | Recent logs | `spm logs NAME -n 100` |
+| Why it stopped or restarted | `spm logs --spm NAME -n 50` (starts, exit codes, restarts) |
 | Restart | `spm restart NAME` |
 | Stop but keep it installed | `spm stop NAME` |
 | Remove it | `spm delete NAME` |

@@ -2,20 +2,27 @@
 
 package common
 
-import "syscall"
+import "golang.org/x/sys/windows"
 
-// ProcessAlive reports whether a process with this ID can be opened.
+// stillActive is the exit code GetExitCodeProcess reports for a running
+// process (STILL_ACTIVE).
+const stillActive = 259
+
+// ProcessAlive reports whether a process with this ID is running. Opening it
+// is not enough: an exited process stays openable for as long as any process
+// on the system still holds a handle to it.
 func ProcessAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	kernel32 := syscall.NewLazyDLL("kernel32.dll")
-	openProcess := kernel32.NewProc("OpenProcess")
-	closeHandle := kernel32.NewProc("CloseHandle")
-	handle, _, _ := openProcess.Call(0x1000, 0, uintptr(pid))
-	if handle == 0 {
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
 		return false
 	}
-	_, _, _ = closeHandle.Call(handle)
-	return true
+	defer windows.CloseHandle(handle)
+	var code uint32
+	if err := windows.GetExitCodeProcess(handle, &code); err != nil {
+		return true
+	}
+	return code == stillActive
 }

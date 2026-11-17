@@ -20,6 +20,7 @@ import (
 
 	"github.com/eyvant/spm/internal/runtime/common"
 	"github.com/eyvant/spm/internal/runtime/scheduler"
+	"github.com/eyvant/spm/internal/runtime/supervisor"
 )
 
 const darwinConfigVersion = 1
@@ -123,7 +124,7 @@ Core commands:
   spm schedule [options] <script|-- command>
   spm list [--json] [--watch[=DURATION]]
   spm status|show|describe <name>
-  spm logs [--lines N] [--follow] [--grep PATTERN] [name...|all]
+  spm logs [--lines N] [--follow] [--grep PATTERN] [--spm|--scheduler] [name...|all]
   spm restart|stop|enable|disable <name...|all>
   spm delete <name...|all> [--yes]
   spm apply|validate|diff spm.toml
@@ -148,7 +149,7 @@ func printPlatformCommandHelp(w io.Writer, command string) bool {
 	case "list", "ls", "status-all":
 		fmt.Fprintln(w, "Usage:\n  spm list [--json] [--watch[=DURATION]]")
 	case "logs":
-		fmt.Fprintln(w, "Usage:\n  spm logs [--follow] [--lines N] [--grep PATTERN] [name...|all]")
+		fmt.Fprintln(w, "Usage:\n  spm logs [--follow] [--lines N] [--grep PATTERN] [--spm|--scheduler] [name...|all]")
 	case "run", "status", "show", "describe", "cat":
 		fmt.Fprintf(w, "Usage:\n  spm %s <name>\n", command)
 	case "restart", "stop", "enable", "disable":
@@ -244,9 +245,14 @@ func (b *darwinBackend) configPath(name string) string {
 	return filepath.Join(b.serviceDir(name), "config.json")
 }
 func (b *darwinBackend) logPath(name string) string {
-	return filepath.Join(b.serviceDir(name), "service.log")
+	return filepath.Join(b.serviceDir(name), common.ServiceLogName)
 }
-func (b *darwinBackend) label(name string) string { return "com.eyvant.spm." + name }
+func (b *darwinBackend) eventLogPath(name string) string {
+	return filepath.Join(b.serviceDir(name), common.EventLogName)
+}
+func (b *darwinBackend) schedulerLogPath() string  { return scheduler.DaemonLogPath(b.root) }
+func (b *darwinBackend) layout() supervisor.Layout { return supervisor.Layout{Root: b.root} }
+func (b *darwinBackend) label(name string) string  { return "com.eyvant.spm." + name }
 func (b *darwinBackend) plistPath(name string) string {
 	return filepath.Join(b.plistDir, b.label(name)+".plist")
 }
@@ -353,6 +359,13 @@ func (b *darwinBackend) start(args []string) error {
 	if err := b.writePlist(config); err != nil {
 		return err
 	}
+	if b.system && config.RunAs != "" {
+		// The supervisor runs as this account and writes the logs and
+		// state below the service directory.
+		if err := b.secureServiceData(config.Name, config.RunAs, config.Group); err != nil {
+			return err
+		}
+	}
 	if err := b.startManaged(config.Name); err != nil {
 		return err
 	}
@@ -402,25 +415,50 @@ func (b *darwinBackend) writePlist(config darwinServiceConfig) error {
 	if err := b.ensureDirectories(config.Name); err != nil {
 		return err
 	}
+	executable, err := runtimeExecutable(supervisorRuntime)
+	if err != nil {
+		return err
+	}
+	data := []byte(renderDarwinServicePlist(config, b.label(config.Name), executable, b.root, b.system))
+	if err := writeFileAtomic(b.servicePlistPath(config.Name), data, 0o644); err != nil {
+		return err
+	}
+	if config.Enabled {
+		return writeFileAtomic(b.plistPath(config.Name), data, 0o644)
+	}
+	if err := os.Remove(b.plistPath(config.Name)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// renderDarwinServicePlist describes a long-running service to launchd.
+// launchd runs spm-supervisor, which starts the service command in the
+// working directory and environment set here, writes its output to
+// service.log and its own records to spm.log, and exits as the service did,
+// so KeepAlive still applies to the service's exit status. launchd's own
+// stdout and stderr redirection is not used: a file it holds open could not
+// be rotated.
+func renderDarwinServicePlist(config darwinServiceConfig, label, executable, root string, system bool) string {
 	env := darwinEnvironment(config)
 	var builder strings.Builder
 	builder.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n")
-	darwinPlistKeyString(&builder, "Label", b.label(config.Name))
+	darwinPlistKeyString(&builder, "Label", label)
 	builder.WriteString("  <key>ProgramArguments</key>\n  <array>\n")
-	for _, value := range config.Command {
+	for _, value := range []string{executable, "launchd", "--root", root, config.Name} {
 		fmt.Fprintf(&builder, "    <string>%s</string>\n", darwinXMLEscape(value))
 	}
 	builder.WriteString("  </array>\n")
 	darwinPlistKeyString(&builder, "WorkingDirectory", config.Cwd)
-	darwinPlistKeyString(&builder, "StandardOutPath", b.logPath(config.Name))
-	darwinPlistKeyString(&builder, "StandardErrorPath", b.logPath(config.Name))
+	darwinPlistKeyString(&builder, "StandardOutPath", "/dev/null")
+	darwinPlistKeyString(&builder, "StandardErrorPath", "/dev/null")
 	if config.Description != "" {
 		darwinPlistKeyString(&builder, "ServiceDescription", config.Description)
 	}
-	if b.system && config.RunAs != "" {
+	if system && config.RunAs != "" {
 		darwinPlistKeyString(&builder, "UserName", config.RunAs)
 	}
-	if b.system && config.Group != "" {
+	if system && config.Group != "" {
 		darwinPlistKeyString(&builder, "GroupName", config.Group)
 	}
 	builder.WriteString("  <key>RunAtLoad</key>\n")
@@ -462,17 +500,7 @@ func (b *darwinBackend) writePlist(config darwinServiceConfig) error {
 		builder.WriteString("  </dict>\n")
 	}
 	builder.WriteString("</dict>\n</plist>\n")
-	data := []byte(builder.String())
-	if err := writeFileAtomic(b.servicePlistPath(config.Name), data, 0o644); err != nil {
-		return err
-	}
-	if config.Enabled {
-		return writeFileAtomic(b.plistPath(config.Name), data, 0o644)
-	}
-	if err := os.Remove(b.plistPath(config.Name)); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	return builder.String()
 }
 
 func darwinPlistKeyString(builder *strings.Builder, key, value string) {
@@ -638,6 +666,17 @@ func (b *darwinBackend) readState(name string) serviceState {
 			state.execStatus = value
 		}
 	}
+	// launchd's pid is spm-supervisor's; report the service process it
+	// runs, as recorded by that supervisor.
+	if state.pid != "" {
+		recorded := b.layout().ReadState(name)
+		if strconv.Itoa(recorded.SupervisorPID) == state.pid {
+			state.pid = ""
+			if recorded.PID > 0 {
+				state.pid = strconv.Itoa(recorded.PID)
+			}
+		}
+	}
 	return state
 }
 
@@ -706,6 +745,11 @@ func (b *darwinBackend) setEnabled(name string, enabled bool) error {
 	if err := b.writePlist(config); err != nil {
 		return err
 	}
+	if b.system && config.RunAs != "" {
+		if err := b.secureServiceData(name, config.RunAs, config.Group); err != nil {
+			return err
+		}
+	}
 	if enabled {
 		return b.startManaged(name)
 	}
@@ -767,7 +811,7 @@ func (b *darwinBackend) status(name string) error {
 			status = "waiting"
 		}
 		w := tabwriter.NewWriter(b.stdout, 0, 4, 2, ' ', 0)
-		for _, row := range [][2]string{{"status", status}, {"name", name}, {"scope", map[bool]string{true: "system", false: "user"}[b.system]}, {"enabled", strconv.FormatBool(config.Enabled)}, {"schedule", valueOr(config.Schedule, "-")}, {"interval", valueOr(config.TimerInterval, "-")}, {"on boot", valueOr(config.TimerOnBoot, "-")}, {"timezone", valueOr(config.Timezone, "local")}, {"last scheduled", scheduler.FormatTime(state.LastScheduledAt)}, {"last finished", scheduler.FormatTime(state.LastFinishedAt)}, {"last exit code", scheduler.FormatExitCode(state.LastExitCode)}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"log", b.logPath(name)}} {
+		for _, row := range [][2]string{{"status", status}, {"name", name}, {"scope", map[bool]string{true: "system", false: "user"}[b.system]}, {"enabled", strconv.FormatBool(config.Enabled)}, {"schedule", valueOr(config.Schedule, "-")}, {"interval", valueOr(config.TimerInterval, "-")}, {"on boot", valueOr(config.TimerOnBoot, "-")}, {"timezone", valueOr(config.Timezone, "local")}, {"last scheduled", scheduler.FormatTime(state.LastScheduledAt)}, {"last finished", scheduler.FormatTime(state.LastFinishedAt)}, {"last exit code", scheduler.FormatExitCode(state.LastExitCode)}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"log", b.logPath(name)}, {"spm log", b.eventLogPath(name)}} {
 			fmt.Fprintf(w, "%s\t%s\n", row[0], row[1])
 		}
 		return w.Flush()
@@ -782,7 +826,7 @@ func (b *darwinBackend) status(name string) error {
 	if config.Enabled {
 		plist = b.plistPath(name)
 	}
-	for _, row := range [][2]string{{"status", state.sub}, {"name", name}, {"scope", scope}, {"backend", "launchd"}, {"label", b.label(name)}, {"enabled", strconv.FormatBool(config.Enabled)}, {"pid", valueOr(state.pid, "-")}, {"runs", valueOr(state.restarts, "0")}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"plist", plist}, {"log", b.logPath(name)}} {
+	for _, row := range [][2]string{{"status", state.sub}, {"name", name}, {"scope", scope}, {"backend", "launchd"}, {"label", b.label(name)}, {"enabled", strconv.FormatBool(config.Enabled)}, {"pid", valueOr(state.pid, "-")}, {"runs", valueOr(state.restarts, "0")}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"plist", plist}, {"log", b.logPath(name)}, {"spm log", b.eventLogPath(name)}} {
 		fmt.Fprintf(w, "%s\t%s\n", row[0], row[1])
 	}
 	return w.Flush()
@@ -793,50 +837,11 @@ func (b *darwinBackend) logs(args []string) error {
 	if err != nil {
 		return err
 	}
-	if options.since != "" || options.until != "" || options.output != "" || options.boot || options.health {
-		return errors.New("macOS logs currently support service names, --lines, --follow, and --grep")
+	files, err := selectLogFiles(b, options, "macOS")
+	if err != nil {
+		return err
 	}
-	names := options.names
-	if len(names) == 0 || len(names) == 1 && names[0] == "all" {
-		names, err = b.names()
-		if err != nil {
-			return err
-		}
-	}
-	lineCount, _ := strconv.Atoi(options.lines)
-	for _, name := range names {
-		if !b.exists(name) {
-			return fmt.Errorf("service %q is not managed by spm", name)
-		}
-		if err := printFileTail(b.stdout, b.logPath(name), lineCount, options.grep); err != nil {
-			return err
-		}
-	}
-	if !options.follow {
-		return nil
-	}
-	offsets := map[string]int64{}
-	identities := map[string]os.FileInfo{}
-	for _, name := range names {
-		if info, err := os.Stat(b.logPath(name)); err == nil {
-			offsets[name] = info.Size()
-			identities[name] = info
-		}
-	}
-	for {
-		time.Sleep(500 * time.Millisecond)
-		for _, name := range names {
-			path := b.logPath(name)
-			info, offset, readErr := common.ReadRotatingLogUpdates(b.stdout, path, identities[name], offsets[name], options.grep)
-			if readErr == nil {
-				identities[name], offsets[name] = info, offset
-			}
-		}
-	}
-}
-
-func printFileTail(w io.Writer, path string, count int, grep string) error {
-	return common.PrintRotatedLogTail(w, path, count, grep)
+	return printLogFiles(b.stdout, files, options)
 }
 
 func (b *darwinBackend) selectNames(selectors []string) ([]string, error) {
@@ -1067,6 +1072,13 @@ func (b *darwinBackend) doctor() error {
 		check("data directory", "OK", b.root)
 	}
 	check("plist directory", "OK", b.plistDir)
+	for _, runtimeName := range []string{supervisorRuntime, schedulerRuntime} {
+		if path, err := runtimeExecutable(runtimeName); err != nil {
+			check(runtimeName, "FAIL", err.Error())
+		} else {
+			check(runtimeName, "OK", path)
+		}
+	}
 	if failed {
 		return errors.New("macOS doctor found failures")
 	}

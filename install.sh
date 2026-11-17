@@ -151,6 +151,7 @@ if [ "$uninstall" = true ]; then
   removed=false
   remove_installed_file "${install_dir}/spm"
   remove_installed_file "${install_dir}/spm-scheduler"
+  remove_installed_file "${install_dir}/spm-supervisor"
   remove_installed_file "${XDG_DATA_HOME:-${HOME}/.local/share}/bash-completion/completions/spm.bash"
   remove_installed_file "${HOME}/.zfunc/_spm"
   remove_installed_file "${XDG_CONFIG_HOME:-${HOME}/.config}/fish/completions/spm.fish"
@@ -243,15 +244,19 @@ fi
 tar -xzf "${temporary_dir}/${archive}" -C "$temporary_dir"
 [ -f "${temporary_dir}/spm" ] || fail "release archive does not contain spm"
 
-# macOS also ships spm-scheduler, the runtime behind scheduled jobs. Release
-# builds of it are reproducible, so it is replaced, and the scheduler
-# restarted, only when the file itself changed: a release that changes only
-# the CLI restarts nothing. Linux needs no runtime: systemd runs services and
-# timers itself.
+# macOS also ships two runtimes: spm-supervisor, which launchd runs for every
+# service and which keeps the service's output in rotating logs, and
+# spm-scheduler, which runs scheduled jobs. Release builds are reproducible,
+# so a runtime is replaced, and its running processes moved onto it, only when
+# the file itself changed: a release that changes only the CLI touches
+# nothing. Linux needs no runtime: systemd runs services and timers itself.
 is_darwin=false
+runtimes="spm-supervisor spm-scheduler"
 if [ "$(uname -s)" = Darwin ]; then
   is_darwin=true
-  [ -f "${temporary_dir}/spm-scheduler" ] || fail "release archive does not contain spm-scheduler"
+  for runtime in $runtimes; do
+    [ -f "${temporary_dir}/${runtime}" ] || fail "release archive does not contain ${runtime}"
+  done
 fi
 
 mkdir -p "$install_dir"
@@ -264,36 +269,45 @@ install -m 0755 "${temporary_dir}/spm" "${install_dir}/spm"
 printf 'Installed spm %s to %s/spm\n' "$version" "$install_dir"
 "${install_dir}/spm" version
 
-scheduler_changed=false
+upgrade_flags=""
 if [ "$is_darwin" = true ]; then
-  if [ -f "${install_dir}/spm-scheduler" ] && cmp -s "${temporary_dir}/spm-scheduler" "${install_dir}/spm-scheduler"; then
-    printf 'spm-scheduler is unchanged\n'
-  else
-    install -m 0755 "${temporary_dir}/spm-scheduler" "${install_dir}/spm-scheduler"
-    printf 'Installed a new spm-scheduler\n'
-    scheduler_changed=true
-  fi
+  for runtime in $runtimes; do
+    if [ -f "${install_dir}/${runtime}" ] && cmp -s "${temporary_dir}/${runtime}" "${install_dir}/${runtime}"; then
+      printf '%s is unchanged\n' "$runtime"
+    else
+      install -m 0755 "${temporary_dir}/${runtime}" "${install_dir}/${runtime}"
+      printf 'Installed a new %s\n' "$runtime"
+      upgrade_flags="${upgrade_flags} --${runtime#spm-}"
+    fi
+  done
 fi
 
-# A replaced spm-scheduler binary is used by the next job run, but the
-# scheduler daemon keeps the previous one in memory until it restarts. Installs
-# from before spm-scheduler existed also have job plists that still run spm.
-if [ "$upgrading" = true ] && [ "$scheduler_changed" = true ]; then
-  if [ "$restart" != true ]; then
-    printf 'Skipped restarting the spm scheduler (--no-restart); it keeps the previous version until restarted.\n'
-  else
-    if ! "${install_dir}/spm" __upgrade-runtime --scheduler; then
-      printf 'spm installer: warning: could not restart the user spm scheduler; run the installer again.\n' >&2
-    fi
-    if directory_has_entries "/Library/Application Support/spm/services"; then
-      if [ "$(id -u)" = 0 ]; then
-        "${install_dir}/spm" --system __upgrade-runtime --scheduler ||
-          printf 'spm installer: warning: could not restart the system spm scheduler.\n' >&2
-      else
-        printf 'Restarting the system spm scheduler requires administrator rights.\n'
-        if ! sudo "${install_dir}/spm" --system __upgrade-runtime --scheduler; then
-          printf 'spm installer: warning: the system spm scheduler still runs the previous version; run the installer again and enter your password.\n' >&2
-        fi
+# Running processes keep the previous binary in memory. A running service's
+# spm-supervisor switches to the new one in place, without restarting the
+# service; the scheduler daemon restarts, which a run in progress survives.
+if [ "$upgrading" = true ] && [ "$restart" != true ]; then
+  case "$upgrade_flags" in
+    *--scheduler*)
+      printf 'Skipped restarting the spm scheduler (--no-restart); it keeps the previous version until restarted.\n'
+      upgrade_flags=$(printf '%s' "$upgrade_flags" | sed 's/ --scheduler//')
+      ;;
+  esac
+fi
+if [ "$upgrading" = true ] && [ -n "$upgrade_flags" ]; then
+  # shellcheck disable=SC2086 # upgrade_flags is a list of flags.
+  if ! "${install_dir}/spm" __upgrade-runtime $upgrade_flags; then
+    printf 'spm installer: warning: could not move user services and jobs onto the new runtime; run the installer again.\n' >&2
+  fi
+  if directory_has_entries "/Library/Application Support/spm/services"; then
+    if [ "$(id -u)" = 0 ]; then
+      # shellcheck disable=SC2086
+      "${install_dir}/spm" --system __upgrade-runtime $upgrade_flags ||
+        printf 'spm installer: warning: could not move system services and jobs onto the new runtime.\n' >&2
+    else
+      printf 'Moving system services and jobs onto the new runtime requires administrator rights.\n'
+      # shellcheck disable=SC2086
+      if ! sudo "${install_dir}/spm" --system __upgrade-runtime $upgrade_flags; then
+        printf 'spm installer: warning: system services and jobs still run the previous runtime; run the installer again and enter your password.\n' >&2
       fi
     fi
   fi

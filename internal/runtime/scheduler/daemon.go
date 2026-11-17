@@ -23,12 +23,16 @@ type portableSchedulerConfig struct {
 	Mode    string `json:"mode"`
 }
 
+// OpenDaemonLog opens the scheduler daemon's own log, scheduler.log in the
+// data root, timestamping every line.
 func OpenDaemonLog(root string, fallback io.Writer) (io.Writer, func()) {
-	file, err := common.OpenRotatingLog(filepath.Join(root, "scheduler.log"), common.DefaultLogMaxBytes, common.DefaultLogBackups)
-	if err != nil {
-		return fallback, func() {}
-	}
-	return file, func() { _ = file.Close() }
+	log := common.OpenEventLog(DaemonLogPath(root), fallback)
+	return log, func() { _ = log.Close() }
+}
+
+// DaemonLogPath is where the scheduler daemon of a data root logs.
+func DaemonLogPath(root string) string {
+	return filepath.Join(root, common.SchedulerLogName)
 }
 
 func DiscoverTasks(root string) ([]Task, error) {

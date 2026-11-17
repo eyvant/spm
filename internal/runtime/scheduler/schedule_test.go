@@ -217,9 +217,25 @@ func TestPortableRunnerFailureLoggingAndEnvironment(t *testing.T) {
 	}
 	stateDir := filepath.Join(directory, "state")
 	logPath := filepath.Join(directory, "task.log")
-	err = Run([]string{"--config", recordPath, "--state-dir", stateDir, "--log", logPath, "--activation", "timer", "--force"}, io.Discard, io.Discard)
+	eventsPath := filepath.Join(directory, "spm.log")
+	err = Run([]string{"--config", recordPath, "--state-dir", stateDir, "--log", logPath, "--events", eventsPath, "--activation", "timer", "--force"}, io.Discard, io.Discard)
 	if err == nil {
 		t.Fatal("failing scheduled command unexpectedly succeeded")
+	}
+	events, readErr := os.ReadFile(eventsPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, want := range []string{"starting scheduled run (manual)", "scheduled run exited with code 7"} {
+		if !strings.Contains(string(events), want) {
+			t.Errorf("events do not contain %q:\n%s", want, events)
+		}
+	}
+	if strings.Count(string(events), "\n") != 2 {
+		t.Errorf("a failed run should be recorded once:\n%s", events)
+	}
+	if output, _ := os.ReadFile(logPath); strings.Contains(string(output), "scheduled run") {
+		t.Errorf("run records leaked into the output log:\n%s", output)
 	}
 	state := ReadState(filepath.Join(stateDir, "schedule-state.json"))
 	if state.LastExitCode == nil || *state.LastExitCode != 7 {

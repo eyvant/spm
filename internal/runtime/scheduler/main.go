@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 
 	"github.com/eyvant/spm/internal/runtime/common"
@@ -14,7 +15,7 @@ import (
 //
 //	spm-scheduler version
 //	spm-scheduler daemon --root ROOT [--domain DOMAIN]
-//	spm-scheduler run --config FILE --state-dir DIR [--log FILE] [--activation KIND] [--force]
+//	spm-scheduler run --config FILE --state-dir DIR [--log FILE] [--events FILE] [--activation KIND] [--force]
 func Main(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: spm-scheduler version | daemon --root ROOT [--domain DOMAIN] | run --config FILE --state-dir DIR")
@@ -36,7 +37,12 @@ func Main(args []string, stdout, stderr io.Writer) error {
 		}
 		log, closeLog := OpenDaemonLog(root, stderr)
 		defer closeLog()
-		return RunDaemon(context.Background(), root, trigger, log)
+		fmt.Fprintf(log, "scheduler %d (build %s) started\n", os.Getpid(), common.BuildID())
+		err = RunDaemon(context.Background(), root, trigger, log)
+		if err != nil {
+			fmt.Fprintf(log, "scheduler %d stopped: %v\n", os.Getpid(), err)
+		}
+		return err
 	default:
 		return fmt.Errorf("unknown spm-scheduler command %q", args[0])
 	}

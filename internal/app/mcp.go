@@ -124,12 +124,13 @@ func spmMCPTools() []mcpTool {
 			namedScopeSchema(), readOnly),
 		mcpToolDefinition("spm_get_logs", "Get service logs",
 			"Read recent log lines from one or more managed services. Use it to check that a service started cleanly, to find why it crashed or keeps restarting, or to read its output such as URLs, ports and errors; use spm_doctor instead when spm itself or the service manager seems broken. "+
-				"Returns plain text, one log entry per line; on Linux each line carries its journal time and source, while on macOS and Windows lines are the service's own output and since is not supported. since and grep filter the entries first, then lines keeps at most that many of the most recent matches (default 100); when nothing matches, the call still succeeds and returns no log lines (Linux prints \"-- No entries --\"). With several names, their entries are combined. Set health=true to read health-check output instead of service output. It never follows logs, so call it again to see newer lines. An unknown name returns an error saying the service is not managed by spm. "+scopeNote,
+				"Returns plain text, one log entry per line; on Linux each line carries its journal time and source, while on macOS and Windows lines are the service's own output and since is not supported. since and grep filter the entries first, then lines keeps at most that many of the most recent matches (default 100); when nothing matches, the call still succeeds and returns no log lines (Linux prints \"-- No entries --\"). With several names, their entries are combined; on macOS and Windows each line then starts with the service name. source picks what to read: service (default) is the service's own output; spm is what spm recorded about the service, such as starts, exit codes, scheduled runs and supervisor upgrades (on Linux, systemd's messages about the unit), and answers why a service stopped or restarted when its output does not; scheduler is the spm scheduler's own log on macOS and Windows and takes no names. Set health=true to read health-check output instead of service output. It never follows logs, so call it again to see newer lines. An unknown name returns an error saying the service is not managed by spm. "+scopeNote,
 			objectSchema(map[string]any{
 				"names":  stringArrayProperty("Service names to read. Omit to read logs for all managed services in the scope."),
 				"lines":  map[string]any{"type": "integer", "minimum": 1, "maximum": 1000, "default": 100, "description": "Maximum number of log lines to return."},
 				"since":  map[string]any{"type": "string", "description": "Only return entries newer than this: a relative time such as 10m or 1h, or a date such as 2026-01-01."},
 				"grep":   map[string]any{"type": "string", "description": "Only return lines matching this pattern, for example error."},
+				"source": map[string]any{"type": "string", "enum": []string{"service", "spm", "scheduler"}, "default": "service", "description": "service: the service's own output. spm: what spm recorded about the service (starts, exits, scheduled runs). scheduler: the spm scheduler's log (macOS and Windows; omit names)."},
 				"health": map[string]any{"type": "boolean", "default": false, "description": "Read health-check logs instead of the service's own output."},
 				"system": systemProperty(),
 			}, nil), readOnly),
@@ -265,6 +266,7 @@ type mcpLogsArgs struct {
 	Lines  int      `json:"lines"`
 	Since  string   `json:"since"`
 	Grep   string   `json:"grep"`
+	Source string   `json:"source"`
 	Health bool     `json:"health"`
 	System bool     `json:"system"`
 }
@@ -327,6 +329,16 @@ func callSPMTool(name string, raw json.RawMessage) map[string]any {
 			}
 			if args.Health {
 				command = append(command, "--health")
+			}
+			switch args.Source {
+			case "", "service":
+			case "spm", "scheduler":
+				command = append(command, "--"+args.Source)
+			default:
+				err = fmt.Errorf("unknown source %q; use service, spm or scheduler", args.Source)
+			}
+			if err != nil {
+				break
 			}
 			command = append(command, args.Names...)
 			output, err = runSPMForMCP(args.System, command...)

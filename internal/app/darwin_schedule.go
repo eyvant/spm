@@ -12,9 +12,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/eyvant/spm/internal/runtime/common"
 	"github.com/eyvant/spm/internal/runtime/scheduler"
+	"github.com/eyvant/spm/internal/runtime/supervisor"
 )
 
 func (b *darwinBackend) scheduleRecordPath(name string) string {
@@ -103,7 +106,7 @@ func (b *darwinBackend) schedule(args []string) error {
 		return err
 	}
 	if b.system && runAs != "" {
-		if err := b.secureScheduleData(name, runAs, group); err != nil {
+		if err := b.secureServiceData(name, runAs, group); err != nil {
 			return err
 		}
 	}
@@ -124,10 +127,10 @@ func (b *darwinBackend) schedule(args []string) error {
 	return nil
 }
 
-func (b *darwinBackend) secureScheduleData(name, account, group string) error {
+func (b *darwinBackend) secureServiceData(name, account, group string) error {
 	owner, err := user.Lookup(account)
 	if err != nil {
-		return fmt.Errorf("look up scheduled task user %q: %w", account, err)
+		return fmt.Errorf("look up service user %q: %w", account, err)
 	}
 	uid, err := strconv.Atoi(owner.Uid)
 	if err != nil {
@@ -137,7 +140,7 @@ func (b *darwinBackend) secureScheduleData(name, account, group string) error {
 	if group != "" {
 		groupEntry, lookupErr := user.LookupGroup(group)
 		if lookupErr != nil {
-			return fmt.Errorf("look up scheduled task group %q: %w", group, lookupErr)
+			return fmt.Errorf("look up service group %q: %w", group, lookupErr)
 		}
 		gidText = groupEntry.Gid
 	}
@@ -158,7 +161,7 @@ func (b *darwinBackend) runScheduledTask(name string, force bool) error {
 	if err != nil {
 		return err
 	}
-	args := []string{"run", "--config", b.scheduleRecordPath(name), "--state-dir", b.scheduleStateDir(name), "--log", b.logPath(name), "--activation", "timer"}
+	args := []string{"run", "--config", b.scheduleRecordPath(name), "--state-dir", b.scheduleStateDir(name), "--log", b.logPath(name), "--events", b.eventLogPath(name), "--activation", "timer"}
 	if force {
 		args = append(args, "--force")
 	}
@@ -173,7 +176,7 @@ func (b *darwinBackend) writeSchedulePlists(config darwinServiceConfig) error {
 		return err
 	}
 	if config.Schedule != "" || config.TimerInterval != "" {
-		data := renderDarwinSchedulePlist(config, b.label(config.Name), executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), "daemon", b.system)
+		data := renderDarwinSchedulePlist(config, b.label(config.Name), executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), b.eventLogPath(config.Name), "daemon", b.system)
 		if err := writeFileAtomic(b.servicePlistPath(config.Name), []byte(data), 0o644); err != nil {
 			return err
 		}
@@ -189,7 +192,7 @@ func (b *darwinBackend) writeSchedulePlists(config darwinServiceConfig) error {
 		_ = os.Remove(b.plistPath(config.Name))
 	}
 	if config.TimerOnBoot != "" {
-		data := renderDarwinSchedulePlist(config, b.bootLabel(config.Name), executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), "boot", b.system)
+		data := renderDarwinSchedulePlist(config, b.bootLabel(config.Name), executable, b.scheduleRecordPath(config.Name), b.scheduleStateDir(config.Name), b.logPath(config.Name), b.eventLogPath(config.Name), "boot", b.system)
 		if err := writeFileAtomic(b.serviceBootPlistPath(config.Name), []byte(data), 0o644); err != nil {
 			return err
 		}
@@ -207,17 +210,20 @@ func (b *darwinBackend) writeSchedulePlists(config darwinServiceConfig) error {
 	return nil
 }
 
-func renderDarwinSchedulePlist(config darwinServiceConfig, label, executable, recordPath, stateDir, logPath, activation string, system bool) string {
+// renderDarwinSchedulePlist describes one activation of a scheduled job.
+// spm-scheduler writes the command's output to logPath and its own records to
+// eventsPath; launchd's redirection is not used, so both files can rotate.
+func renderDarwinSchedulePlist(config darwinServiceConfig, label, executable, recordPath, stateDir, logPath, eventsPath, activation string, system bool) string {
 	var builder strings.Builder
 	builder.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n")
 	darwinPlistKeyString(&builder, "Label", label)
 	builder.WriteString("  <key>ProgramArguments</key>\n  <array>\n")
-	for _, value := range []string{executable, "run", "--config", recordPath, "--state-dir", stateDir, "--log", logPath, "--activation", activation} {
+	for _, value := range []string{executable, "run", "--config", recordPath, "--state-dir", stateDir, "--log", logPath, "--events", eventsPath, "--activation", activation} {
 		fmt.Fprintf(&builder, "    <string>%s</string>\n", darwinXMLEscape(value))
 	}
 	builder.WriteString("  </array>\n")
-	darwinPlistKeyString(&builder, "StandardOutPath", logPath)
-	darwinPlistKeyString(&builder, "StandardErrorPath", logPath)
+	darwinPlistKeyString(&builder, "StandardOutPath", "/dev/null")
+	darwinPlistKeyString(&builder, "StandardErrorPath", "/dev/null")
 	if config.Description != "" {
 		darwinPlistKeyString(&builder, "ServiceDescription", config.Description)
 	}
@@ -265,7 +271,7 @@ func (b *darwinBackend) setScheduledEnabled(config darwinServiceConfig, enabled 
 		return err
 	}
 	if b.system && config.RunAs != "" {
-		if err := b.secureScheduleData(config.Name, config.RunAs, config.Group); err != nil {
+		if err := b.secureServiceData(config.Name, config.RunAs, config.Group); err != nil {
 			return err
 		}
 	}
@@ -298,7 +304,7 @@ func (b *darwinBackend) refreshScheduleDaemon() error {
 	if err != nil {
 		return err
 	}
-	data := renderDarwinScheduleDaemonPlist(b.scheduleDaemonLabel(), executable, b.root, b.domain(), filepath.Join(b.root, "scheduler.log"))
+	data := renderDarwinScheduleDaemonPlist(b.scheduleDaemonLabel(), executable, b.root, b.domain())
 	if err := writeFileAtomic(b.serviceScheduleDaemonPlistPath(), []byte(data), 0o644); err != nil {
 		return err
 	}
@@ -311,23 +317,29 @@ func (b *darwinBackend) refreshScheduleDaemon() error {
 	return nil
 }
 
-// upgradeRuntime moves scheduling onto the installed spm-scheduler. launchd
-// runs service commands directly, so only the scheduler is involved.
+// upgradeRuntime moves this scope's background processes onto the installed
+// runtimes.
 //
-// Job plists that still point elsewhere (older versions ran `spm
-// __scheduled-run`) are rewritten and reloaded. A job that is running right now
-// is not reloaded, because booting it out would kill the run; launchd picks up
-// its rewritten plist at the next login. The scheduler daemon is always
-// restarted onto the new binary.
+// scheduler: job plists that changed are rewritten and reloaded. A job that
+// is running right now is not reloaded, because booting it out would kill the
+// run; launchd picks up its rewritten plist at the next login. The scheduler
+// daemon is always restarted onto the new binary.
+//
+// supervisor: every running service's spm-supervisor re-executes the
+// installed binary in place (see upgradeSupervisor), so the service keeps
+// running.
 func (b *darwinBackend) upgradeRuntime(components upgradeComponents) error {
-	if !components.scheduler {
-		return nil
-	}
 	names, err := b.names()
 	if err != nil {
 		return err
 	}
 	var errs []error
+	if components.supervisor {
+		errs = append(errs, b.upgradeSupervisors(names, components.allowRestart)...)
+	}
+	if !components.scheduler {
+		return errors.Join(errs...)
+	}
 	for _, name := range names {
 		config, err := b.readConfig(name)
 		if err != nil || config.Mode != "schedule" {
@@ -375,7 +387,9 @@ func (b *darwinBackend) loadedScheduleTarget(target string) bool {
 	return err == nil
 }
 
-func renderDarwinScheduleDaemonPlist(label, executable, root, domain, logPath string) string {
+// renderDarwinScheduleDaemonPlist describes the scheduler daemon, which
+// writes scheduler.log in root itself.
+func renderDarwinScheduleDaemonPlist(label, executable, root, domain string) string {
 	var builder strings.Builder
 	builder.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n")
 	darwinPlistKeyString(&builder, "Label", label)
@@ -384,9 +398,100 @@ func renderDarwinScheduleDaemonPlist(label, executable, root, domain, logPath st
 		fmt.Fprintf(&builder, "    <string>%s</string>\n", darwinXMLEscape(value))
 	}
 	builder.WriteString("  </array>\n")
-	darwinPlistKeyString(&builder, "StandardOutPath", logPath)
-	darwinPlistKeyString(&builder, "StandardErrorPath", logPath)
+	darwinPlistKeyString(&builder, "StandardOutPath", "/dev/null")
+	darwinPlistKeyString(&builder, "StandardErrorPath", "/dev/null")
 	builder.WriteString("  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <true/>\n  <key>ProcessType</key>\n  <string>Background</string>\n")
 	builder.WriteString("</dict>\n</plist>\n")
 	return builder.String()
+}
+
+const outcomeSwitched = "switched to the new supervisor (kept running)"
+
+func (b *darwinBackend) upgradeSupervisors(names []string, allowRestart bool) []error {
+	executable, err := runtimeExecutable(supervisorRuntime)
+	if err != nil {
+		return []error{err}
+	}
+	build, err := common.FileBuildID(executable)
+	if err != nil {
+		return []error{fmt.Errorf("read %s: %w", executable, err)}
+	}
+	var errs []error
+	for _, name := range names {
+		config, err := b.readConfig(name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+		if config.Mode == "schedule" {
+			continue
+		}
+		// A plist that points at another supervisor path takes effect the
+		// next time launchd loads the service.
+		if err := b.writePlist(config); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+		outcome, err := b.upgradeSupervisor(name, executable, build, allowRestart)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		} else if outcome != "" {
+			fmt.Fprintf(b.stdout, "%s %s\n", name, outcome)
+		}
+	}
+	return errs
+}
+
+// upgradeSupervisor asks a running service's supervisor to exec executable in
+// place and waits until the new image reports build. The process ID that
+// launchd tracks, the service process and its output pipe all stay, so the
+// service is not interrupted. If the switch does not happen, the old
+// supervisor keeps running the service; with allowRestart the service is
+// restarted onto the new supervisor instead.
+func (b *darwinBackend) upgradeSupervisor(name, executable, build string, allowRestart bool) (string, error) {
+	launchdState := b.readState(name)
+	if launchdState.sub != "running" {
+		return "", nil
+	}
+	layout := b.layout()
+	before := layout.ReadState(name)
+	if before.SupervisorPID <= 0 || before.PID <= 0 {
+		return "", nil
+	}
+	if before.Build == build {
+		return "", nil
+	}
+	if err := layout.WriteControlRequest(name, supervisor.Control{Action: "reexec", Executable: executable}); err != nil {
+		return "", err
+	}
+	// The supervisor of a system service may run as another account.
+	if info, err := os.Stat(b.serviceDir(name)); err == nil {
+		if owner, ok := info.Sys().(*syscall.Stat_t); ok {
+			_ = os.Chown(layout.ControlPath(name), int(owner.Uid), int(owner.Gid))
+		}
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		after := layout.ReadState(name)
+		if after.SupervisorPID == before.SupervisorPID && after.Build == build {
+			return outcomeSwitched, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = os.Remove(layout.ControlPath(name))
+	reason := fmt.Sprintf("the running supervisor did not switch to %s within 10s; see '%s'", executable, b.spmLogsCommand(name))
+	if !allowRestart {
+		return "", fmt.Errorf("%s. It keeps running on its current supervisor; restart it with 'spm restart %s' to move it", reason, name)
+	}
+	if _, err := b.launchctl("kickstart", "-k", b.target(name)); err != nil {
+		return "", fmt.Errorf("%s, and restarting it failed: %w", reason, err)
+	}
+	return "restarted on the new supervisor", nil
+}
+
+func (b *darwinBackend) spmLogsCommand(name string) string {
+	if b.system {
+		return "sudo spm --system logs --spm " + name
+	}
+	return "spm logs --spm " + name
 }

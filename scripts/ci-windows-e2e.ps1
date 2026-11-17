@@ -90,12 +90,17 @@ function Wait-Running([string]$Name) {
     throw "$Name did not reach running state."
 }
 
-function Wait-Log([string]$Name, [string]$Pattern, [int]$TimeoutSeconds = 30) {
+# Wait-Log waits for the service's output, or with -Spm for what spm
+# recorded about the service, to contain Pattern.
+function Wait-Log([string]$Name, [string]$Pattern, [int]$TimeoutSeconds = 30, [switch]$Spm) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $lastLog = ''
+    $arguments = @('logs', '--lines', '100')
+    if ($Spm) { $arguments += '--spm' }
+    $arguments += $Name
     while ([DateTime]::UtcNow -lt $deadline) {
         try {
-            $lastLog = (Invoke-Spm @('logs', '--lines', '100', $Name) -Capture) -join "`n"
+            $lastLog = (Invoke-Spm $arguments -Capture) -join "`n"
             if ($lastLog -match [regex]::Escape($Pattern)) { return }
         } catch {}
         Start-Sleep -Milliseconds 250
@@ -167,6 +172,10 @@ try {
     Write-Host "==> $Scope lifecycle, PowerShell inference, logs, and native inspection"
     Start-Workload $main $(if ($system) { 'LocalService' } else { '' })
     Wait-Log $main 'READY'
+    Wait-Log $main 'starting' -Spm
+    if (((Invoke-Spm @('logs', '--lines', '100', '--spm', $main) -Capture) -join "`n") -match '(?m)^READY') {
+        throw "Service output of $main leaked into its spm log"
+    }
     Invoke-Spm @('status', $main) | Out-Null
     Invoke-Spm @('native', 'windows', 'inspect', $main) | Out-Null
     Invoke-Spm @('restart', $main) | Out-Null
@@ -191,8 +200,8 @@ try {
     $before = Get-Content -Raw -LiteralPath $stateFile | ConvertFrom-Json
     $output = Invoke-Spm @('__upgrade-runtime', '--supervisor') -Capture
     if (($output -join "`n") -notmatch [regex]::Escape("$main handed over")) {
-        $serviceLog = Get-Content -LiteralPath (Join-Path $data "services\$main\service.log") -Tail 20 -ErrorAction SilentlyContinue
-        throw "Supervisor upgrade did not hand $main over:`n$($output -join "`n")`nSERVICE LOG`n$($serviceLog -join "`n")"
+        $spmLog = Get-Content -LiteralPath (Join-Path $data "services\$main\spm.log") -Tail 20 -ErrorAction SilentlyContinue
+        throw "Supervisor upgrade did not hand $main over:`n$($output -join "`n")`nSPM LOG`n$($spmLog -join "`n")"
     }
     $after = Get-Content -Raw -LiteralPath $stateFile | ConvertFrom-Json
     if ($after.pid -ne $before.pid -or $null -eq (Get-Process -Id $before.pid -ErrorAction SilentlyContinue)) {
@@ -204,7 +213,7 @@ try {
     if ($system -and (Get-CimInstance Win32_Service -Filter "Name='spm-$main'").State -ne 'Running') {
         throw "SCM service spm-$main is not running after the handoff"
     }
-    Wait-Log $main 'took over running process'
+    Wait-Log $main 'took over running process' -Spm
     Invoke-Spm @('restart', $main) | Out-Null
     Wait-Running $main
 

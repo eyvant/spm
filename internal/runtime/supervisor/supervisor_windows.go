@@ -1,18 +1,11 @@
 //go:build windows
 
-// Package supervisor is the process supervisor behind every Windows service
-// managed by spm. It is built into spm-supervisor.exe, which stays running for
-// as long as its service runs, so this package changes rarely. Installers
-// replace spm-supervisor.exe only when the file changes (see common.BuildID).
 package supervisor
 
 import (
-	"bufio"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -21,184 +14,57 @@ import (
 	"github.com/eyvant/spm/internal/runtime/common"
 )
 
-// StateVersion is the format version of config.json and state.json.
-const StateVersion = 1
-
-// Config is a service's config.json.
-type Config struct {
-	Version          int      `json:"version"`
-	Name             string   `json:"name"`
-	Description      string   `json:"description"`
-	Cwd              string   `json:"cwd"`
-	Command          []string `json:"command"`
-	Env              []string `json:"env,omitempty"`
-	EnvFile          string   `json:"env_file,omitempty"`
-	Restart          string   `json:"restart"`
-	RestartSec       string   `json:"restart_sec"`
-	Enabled          bool     `json:"enabled"`
-	RunAs            string   `json:"run_as,omitempty"`
-	After            []string `json:"after,omitempty"`
-	Wants            []string `json:"wants,omitempty"`
-	Requires         []string `json:"requires,omitempty"`
-	Mode             string   `json:"mode,omitempty"`
-	Schedule         string   `json:"schedule,omitempty"`
-	Timezone         string   `json:"timezone,omitempty"`
-	TimerOnBoot      string   `json:"timer_on_boot,omitempty"`
-	TimerInterval    string   `json:"timer_interval,omitempty"`
-	TimerRandomDelay string   `json:"timer_randomized_delay,omitempty"`
-	Persistent       bool     `json:"persistent,omitempty"`
-}
-
-// State is a service's state.json, written by the supervisor.
-type State struct {
-	Version       int       `json:"version"`
-	Name          string    `json:"name"`
-	Status        string    `json:"status"`
-	SupervisorPID int       `json:"supervisor_pid,omitempty"`
-	PID           int       `json:"pid,omitempty"`
-	Restarts      int       `json:"restarts"`
-	StartedAt     time.Time `json:"started_at,omitempty"`
-	StoppedAt     time.Time `json:"stopped_at,omitempty"`
-	ExitCode      *int      `json:"exit_code,omitempty"`
-	Error         string    `json:"error,omitempty"`
-}
-
-// Control is a request the CLI drops into control.json for the supervisor.
-type Control struct {
-	Action      string `json:"action"`
-	RequestedAt int64  `json:"requested_at"`
-}
-
-// Layout locates service files below a data root. Global is set for system
-// services; their job objects live in the Global\ namespace so an elevated
-// CLI in another session can open them.
-type Layout struct {
-	Root   string
-	Global bool
-}
-
-func (l Layout) ServicesDir() string           { return filepath.Join(l.Root, "services") }
-func (l Layout) ServiceDir(name string) string { return filepath.Join(l.ServicesDir(), name) }
-func (l Layout) ConfigPath(name string) string {
-	return filepath.Join(l.ServiceDir(name), "config.json")
-}
-func (l Layout) StatePath(name string) string { return filepath.Join(l.ServiceDir(name), "state.json") }
-func (l Layout) ControlPath(name string) string {
-	return filepath.Join(l.ServiceDir(name), "control.json")
-}
-func (l Layout) LogPath(name string) string { return filepath.Join(l.ServiceDir(name), "service.log") }
-
-func (l Layout) EnsureDirectories() error {
-	for _, directory := range []string{l.Root, l.ServicesDir()} {
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			return fmt.Errorf("create %s: %w", directory, err)
-		}
-	}
-	return nil
-}
-
-func (l Layout) ReadConfig(name string) (Config, error) {
-	var config Config
-	data, err := os.ReadFile(l.ConfigPath(name))
-	if err != nil {
-		return config, err
-	}
-	if err := json.Unmarshal(data, &config); err != nil {
-		return config, err
-	}
-	if config.Version != StateVersion || config.Name != name || len(config.Command) == 0 {
-		return config, fmt.Errorf("invalid Windows service configuration for %q", name)
-	}
-	return config, nil
-}
-
-// ReadState returns the recorded state with dead processes cleared.
-func (l Layout) ReadState(name string) State {
-	var state State
-	data, err := os.ReadFile(l.StatePath(name))
-	if err == nil {
-		_ = json.Unmarshal(data, &state)
-	}
-	if state.Name == "" {
-		state.Name = name
-		state.Version = StateVersion
-		state.Status = "stopped"
-	}
-	if state.PID > 0 && !common.ProcessAlive(state.PID) {
-		state.PID = 0
-		if state.Status == "running" || state.Status == "starting" {
-			state.Status = "stopped"
-		}
-	}
-	if state.SupervisorPID > 0 && !common.ProcessAlive(state.SupervisorPID) {
-		state.SupervisorPID = 0
-	}
-	return state
-}
-
-func (l Layout) WriteState(state State) error {
-	if err := l.EnsureDirectories(); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	return common.WriteFileAtomic(l.StatePath(state.Name), append(data, '\n'), 0o600)
-}
-
-func (l Layout) TakeControl(name string) (Control, bool) {
-	var control Control
-	data, err := os.ReadFile(l.ControlPath(name))
-	if err != nil || json.Unmarshal(data, &control) != nil {
-		return control, false
-	}
-	if err := os.Remove(l.ControlPath(name)); err != nil {
-		return control, false
-	}
-	return control, true
-}
-
-func (l Layout) WriteControl(name, action string) error {
-	control := Control{Action: action, RequestedAt: time.Now().UnixNano()}
-	data, _ := json.Marshal(control)
-	return common.WriteFileAtomic(l.ControlPath(name), data, 0o600)
-}
-
 // Supervise runs the service command, restarts it according to its policy,
 // and answers stop/restart/detach requests until the service stops.
 //
+// The service writes its output into a pipe that the supervisor copies to
+// service.log, rotating it; what the supervisor itself does goes to spm.log.
+//
 // When the previous supervisor detached (see Detach), Supervise adopts the
-// service process that is still running instead of starting a new one, so a
-// supervisor upgrade does not interrupt the service.
+// service process that is still running, and its output pipe, instead of
+// starting a new one, so a supervisor upgrade does not interrupt the service.
 func Supervise(l Layout, name string) error {
-	config, err := l.ReadConfig(name)
-	if err != nil {
-		return fmt.Errorf("read supervisor config: %w", err)
-	}
 	if err := l.EnsureDirectories(); err != nil {
 		return err
+	}
+	events := openEvents(l, name)
+	defer events.Close()
+	config, err := l.ReadConfig(name)
+	if err != nil {
+		events.Printf("supervisor %d cannot read the service configuration: %v", os.Getpid(), err)
+		return fmt.Errorf("read supervisor config: %w", err)
 	}
 	previous := l.ReadState(name)
 	if previous.SupervisorPID > 0 && previous.SupervisorPID != os.Getpid() {
 		return fmt.Errorf("service %s is already supervised by process %d", name, previous.SupervisorPID)
 	}
-	log, err := os.OpenFile(l.LogPath(name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	output, err := common.OpenRotatingLog(l.LogPath(name), common.DefaultLogMaxBytes, common.DefaultLogBackups)
 	if err != nil {
+		events.Printf("supervisor %d cannot open %s: %v", os.Getpid(), l.LogPath(name), err)
 		return err
 	}
-	defer log.Close()
-	state := State{Version: StateVersion, Name: name, Status: "starting", SupervisorPID: os.Getpid()}
+	defer output.Close()
+	build := common.BuildID()
+	state := State{Version: StateVersion, Name: name, Status: "starting", SupervisorPID: os.Getpid(), Build: build}
 	adopted, adoptErr := adopt(l, name, previous.PID)
 	if adopted != nil {
 		state.Restarts, state.StartedAt = previous.Restarts, previous.StartedAt
-		fmt.Fprintf(log, "[%s] spm: supervisor %d (build %s) took over running process %d\r\n", time.Now().Format(time.RFC3339), os.Getpid(), common.BuildID(), adopted.pid)
+		if previous.OutputHolder > 0 {
+			read, takeErr := takeOutput(previous.OutputHolder, previous.OutputHandle)
+			if takeErr != nil {
+				events.Printf("warning: supervisor %d took over process %d without its output: %v", os.Getpid(), adopted.pid, takeErr)
+			} else {
+				adopted.output = read
+				releaseOutputHolder(l, name, previous.OutputHolder)
+			}
+		}
+		events.Printf("supervisor %d (build %s) took over running process %d", os.Getpid(), build, adopted.pid)
 	} else if !errors.Is(adoptErr, errNothingToAdopt) {
 		// A live process is waiting to be taken over. Starting a second
 		// one, or terminating it, would turn a failed handoff into a restart;
 		// leave it to whoever is holding its job, which restores the
 		// previous supervisor.
-		fmt.Fprintf(log, "[%s] spm: supervisor %d could not take over running process %d: %v\r\n", time.Now().Format(time.RFC3339), os.Getpid(), previous.PID, adoptErr)
+		events.Printf("supervisor %d could not take over running process %d: %v", os.Getpid(), previous.PID, adoptErr)
 		return fmt.Errorf("cannot take over running process %d: %w", previous.PID, adoptErr)
 	}
 	_ = l.WriteState(state)
@@ -210,41 +76,42 @@ func Supervise(l Layout, name string) error {
 		current := adopted
 		adopted = nil
 		if current == nil {
-			fmt.Fprintf(log, "[%s] spm: starting %s\r\n", time.Now().Format(time.RFC3339), strings.Join(config.Command, " "))
+			events.Printf("starting %s", strings.Join(config.Command, " "))
 			started := time.Now()
 			var jobErr error
-			current, jobErr, err = startChild(l, name, config, log)
+			current, jobErr, err = startChild(l, name, config)
 			if err != nil {
 				state.Status, state.Error, state.PID, state.SupervisorPID = "failed", err.Error(), 0, 0
 				state.StoppedAt = time.Now()
-				fmt.Fprintf(log, "[%s] spm: start failed: %v\r\n", time.Now().Format(time.RFC3339), err)
-				_ = log.Close()
+				events.Printf("start failed: %v", err)
 				_ = l.WriteState(state)
 				return nil
 			}
 			if jobErr != nil {
-				fmt.Fprintf(log, "[%s] spm: warning: cannot create process job: %v\r\n", time.Now().Format(time.RFC3339), jobErr)
+				events.Printf("warning: cannot create process job: %v", jobErr)
 			}
 			state.StartedAt = started
 		}
+		current.startPump(output)
 		state.Status, state.Error, state.PID, state.StoppedAt, state.ExitCode = "running", "", current.pid, time.Time{}, nil
+		state.OutputHandle, state.OutputHolder = 0, 0
 		_ = l.WriteState(state)
-		action, exitCode := monitor(l, name, current)
+		action, exitCode := monitor(l, name, current, events, &state)
 		if action == "detach" {
-			// Whoever asked for the detach holds the job open, so the
-			// service keeps running until the next supervisor adopts it.
+			// Whoever asked for the detach holds the job, and now the
+			// output pipe, so the service keeps running until the next
+			// supervisor adopts it.
 			current.release()
 			state.SupervisorPID = 0
-			fmt.Fprintf(log, "[%s] spm: supervisor %d detached; process %d keeps running\r\n", time.Now().Format(time.RFC3339), os.Getpid(), current.pid)
+			events.Printf("supervisor %d detached; process %d keeps running", os.Getpid(), current.pid)
 			_ = l.WriteState(state)
 			return nil
 		}
 		current.close()
 		state.PID, state.ExitCode, state.StoppedAt = 0, &exitCode, time.Now()
-		fmt.Fprintf(log, "[%s] spm: process exited with code %d\r\n", time.Now().Format(time.RFC3339), exitCode)
+		events.Printf("process exited with code %d", exitCode)
 		if action == "stop" {
 			state.Status, state.SupervisorPID = "stopped", 0
-			_ = log.Close()
 			_ = l.WriteState(state)
 			return nil
 		}
@@ -257,6 +124,7 @@ func Supervise(l Layout, name string) error {
 			state.Restarts++
 			_ = l.WriteState(state)
 			if action != "restart" && delay > 0 {
+				events.Printf("restarting in %s", delay)
 				time.Sleep(delay)
 			}
 			continue
@@ -268,15 +136,15 @@ func Supervise(l Layout, name string) error {
 			state.Status = "failed"
 			state.Error = fmt.Sprintf("process exited with code %d", exitCode)
 		}
-		_ = log.Close()
 		_ = l.WriteState(state)
 		return nil
 	}
 }
 
 // monitor waits for the process to exit or for a control request. stop and
-// restart terminate the process first; detach leaves it running.
-func monitor(l Layout, name string, current *child) (string, int) {
+// restart terminate the process first; detach leaves it running, and its
+// output pipe with an output holder, recorded in state.
+func monitor(l Layout, name string, current *child, events *common.EventLog, state *State) (string, int) {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -290,65 +158,22 @@ func monitor(l Layout, name string, current *child) (string, int) {
 			}
 			switch control.Action {
 			case "stop", "restart":
+				events.Printf("%s requested", control.Action)
 				current.kill()
 				return control.Action, int(<-current.done)
 			case "detach":
+				if err := current.handOutput(l, name, state); err != nil {
+					// Keep supervising: the requester sees that this
+					// supervisor did not exit and reports the handoff as
+					// failed.
+					events.Printf("cannot detach: %v", err)
+					current.startPump(nil)
+					continue
+				}
 				return "detach", 0
 			}
 		}
 	}
-}
-
-func ShouldRestart(policy string, waitErr error, exitCode int) bool {
-	switch policy {
-	case "always":
-		return true
-	case "on-success":
-		return exitCode == 0
-	case "on-failure", "on-abnormal", "on-abort", "on-watchdog":
-		return waitErr != nil || exitCode != 0
-	default:
-		return false
-	}
-}
-
-// Environment is the process environment plus the service's env file and
-// variables; later definitions win and names compare case-insensitively.
-func Environment(config Config) []string {
-	env := append([]string(nil), os.Environ()...)
-	if config.EnvFile != "" {
-		if file, err := os.Open(config.EnvFile); err == nil {
-			scanner := bufio.NewScanner(file)
-			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
-				if line == "" || strings.HasPrefix(line, "#") {
-					continue
-				}
-				if key, value, ok := strings.Cut(line, "="); ok && key != "" {
-					value = strings.Trim(value, "\"'")
-					env = SetEnv(env, key, value)
-				}
-			}
-			_ = file.Close()
-		}
-	}
-	for _, item := range config.Env {
-		if key, value, ok := strings.Cut(item, "="); ok {
-			env = SetEnv(env, key, value)
-		}
-	}
-	return env
-}
-
-func SetEnv(env []string, key, value string) []string {
-	prefix := strings.ToUpper(key) + "="
-	for i, item := range env {
-		if strings.HasPrefix(strings.ToUpper(item), prefix) {
-			env[i] = key + "=" + value
-			return env
-		}
-	}
-	return append(env, key+"="+value)
 }
 
 type jobBasicLimitInformation struct {

@@ -17,16 +17,25 @@ func BuildID() string {
 	if err != nil {
 		return "unknown"
 	}
-	file, err := os.Open(path)
+	id, err := FileBuildID(path)
 	if err != nil {
 		return "unknown"
+	}
+	return id
+}
+
+// FileBuildID is the BuildID a runtime binary at path reports once it runs.
+func FileBuildID(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
 	}
 	defer file.Close()
 	digest := sha256.New()
 	if _, err := io.Copy(digest, file); err != nil {
-		return "unknown"
+		return "", err
 	}
-	return hex.EncodeToString(digest.Sum(nil))[:12]
+	return hex.EncodeToString(digest.Sum(nil))[:12], nil
 }
 
 // VersionLine is what "<runtime> version" prints.

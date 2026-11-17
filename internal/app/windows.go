@@ -135,7 +135,7 @@ Core commands:
   spm run <name>
   spm list [--json] [--watch[=DURATION]]
   spm status|show|describe <name>
-  spm logs [--lines N] [--follow] [--grep PATTERN] [name...|all]
+  spm logs [--lines N] [--follow] [--grep PATTERN] [--spm|--scheduler] [name...|all]
   spm restart|stop|enable|disable <name...|all>
   spm delete <name...|all> [--yes]
   spm cat <name>
@@ -192,7 +192,7 @@ Run spm with no arguments for the Windows option list.
 	case "list", "ls", "status-all":
 		fmt.Fprintln(w, "Usage:\n  spm list [--json] [--watch[=DURATION]]")
 	case "logs":
-		fmt.Fprintln(w, "Usage:\n  spm logs [--follow] [--lines N] [--grep PATTERN] [name...|all]")
+		fmt.Fprintln(w, "Usage:\n  spm logs [--follow] [--lines N] [--grep PATTERN] [--spm|--scheduler] [name...|all]")
 	case "run", "status", "show", "describe", "cat":
 		fmt.Fprintf(w, "Usage:\n  spm %s <name>\n", command)
 	case "restart", "stop", "enable", "disable":
@@ -332,8 +332,12 @@ func (b *windowsBackend) controlPath(name string) string {
 	return filepath.Join(b.serviceDir(name), "control.json")
 }
 func (b *windowsBackend) logPath(name string) string {
-	return filepath.Join(b.serviceDir(name), "service.log")
+	return filepath.Join(b.serviceDir(name), common.ServiceLogName)
 }
+func (b *windowsBackend) eventLogPath(name string) string {
+	return filepath.Join(b.serviceDir(name), common.EventLogName)
+}
+func (b *windowsBackend) schedulerLogPath() string { return scheduler.DaemonLogPath(b.root) }
 
 func (b *windowsBackend) exists(name string) bool {
 	info, err := os.Stat(b.configPath(name))
@@ -1154,7 +1158,7 @@ func (b *windowsBackend) status(name string) error {
 		if config.Enabled {
 			status = "waiting"
 		}
-		rows = [][2]string{{"status", status}, {"name", name}, {"scope", scope}, {"account", account}, {"enabled", strconv.FormatBool(config.Enabled)}, {"schedule", valueOr(config.Schedule, "-")}, {"interval", valueOr(config.TimerInterval, "-")}, {"on boot", valueOr(config.TimerOnBoot, "-")}, {"timezone", valueOr(config.Timezone, "local")}, {"last scheduled", scheduler.FormatTime(scheduleState.LastScheduledAt)}, {"last finished", scheduler.FormatTime(scheduleState.LastFinishedAt)}, {"last exit code", scheduler.FormatExitCode(scheduleState.LastExitCode)}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"log", b.logPath(name)}}
+		rows = [][2]string{{"status", status}, {"name", name}, {"scope", scope}, {"account", account}, {"enabled", strconv.FormatBool(config.Enabled)}, {"schedule", valueOr(config.Schedule, "-")}, {"interval", valueOr(config.TimerInterval, "-")}, {"on boot", valueOr(config.TimerOnBoot, "-")}, {"timezone", valueOr(config.Timezone, "local")}, {"last scheduled", scheduler.FormatTime(scheduleState.LastScheduledAt)}, {"last finished", scheduler.FormatTime(scheduleState.LastFinishedAt)}, {"last exit code", scheduler.FormatExitCode(scheduleState.LastExitCode)}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"log", b.logPath(name)}, {"spm log", b.eventLogPath(name)}}
 		for _, row := range rows {
 			fmt.Fprintf(w, "%s\t%s\n", row[0], row[1])
 		}
@@ -1163,7 +1167,7 @@ func (b *windowsBackend) status(name string) error {
 	if b.system {
 		rows = append(rows, [2]string{"SCM service", b.scmName(name)})
 	}
-	rows = append(rows, [][2]string{{"enabled", strconv.FormatBool(config.Enabled)}, {"pid", valueOr(strconv.Itoa(state.PID), "-")}, {"supervisor pid", strconv.Itoa(state.SupervisorPID)}, {"restarts", strconv.Itoa(state.Restarts)}, {"uptime", uptime}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"log", b.logPath(name)}}...)
+	rows = append(rows, [][2]string{{"enabled", strconv.FormatBool(config.Enabled)}, {"pid", valueOr(strconv.Itoa(state.PID), "-")}, {"supervisor pid", strconv.Itoa(state.SupervisorPID)}, {"restarts", strconv.Itoa(state.Restarts)}, {"uptime", uptime}, {"command", strings.Join(config.Command, " ")}, {"cwd", config.Cwd}, {"log", b.logPath(name)}, {"spm log", b.eventLogPath(name)}}...)
 	for _, row := range rows {
 		value := row[1]
 		if value == "0" && (row[0] == "pid" || row[0] == "supervisor pid") {
@@ -1179,50 +1183,11 @@ func (b *windowsBackend) logs(args []string) error {
 	if err != nil {
 		return err
 	}
-	if options.since != "" || options.until != "" || options.output != "" || options.boot || options.health {
-		return errors.New("windows logs currently support service names, --lines, --follow, and --grep")
+	files, err := selectLogFiles(b, options, "Windows")
+	if err != nil {
+		return err
 	}
-	names := options.names
-	if len(names) == 0 || len(names) == 1 && names[0] == "all" {
-		names, err = b.names()
-		if err != nil {
-			return err
-		}
-	}
-	lineCount, _ := strconv.Atoi(options.lines)
-	for _, name := range names {
-		if !b.exists(name) {
-			return fmt.Errorf("service %q is not managed by spm", name)
-		}
-		if err := b.printLogTail(name, lineCount, options.grep); err != nil {
-			return err
-		}
-	}
-	if !options.follow {
-		return nil
-	}
-	offsets := map[string]int64{}
-	identities := map[string]os.FileInfo{}
-	for _, name := range names {
-		if info, err := os.Stat(b.logPath(name)); err == nil {
-			offsets[name] = info.Size()
-			identities[name] = info
-		}
-	}
-	for {
-		time.Sleep(500 * time.Millisecond)
-		for _, name := range names {
-			path := b.logPath(name)
-			info, offset, readErr := common.ReadRotatingLogUpdates(b.stdout, path, identities[name], offsets[name], options.grep)
-			if readErr == nil {
-				identities[name], offsets[name] = info, offset
-			}
-		}
-	}
-}
-
-func (b *windowsBackend) printLogTail(name string, count int, grep string) error {
-	return common.PrintRotatedLogTail(b.stdout, b.logPath(name), count, grep)
+	return printLogFiles(b.stdout, files, options)
 }
 
 func (b *windowsBackend) selectNames(selectors []string, deleteAll bool) ([]string, error) {

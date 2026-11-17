@@ -5,7 +5,7 @@
 Key facts for agents:
 
 - Start a persistent process: `spm start --name NAME -- COMMAND ARGS...` (working directory is the current directory).
-- Inspect: `spm list --json`, `spm show NAME`, `spm logs NAME -n 100`. Do not use `spm logs -f` or `spm list --watch`; they never return.
+- Inspect: `spm list --json`, `spm show NAME`, `spm logs NAME -n 100`. `spm logs --spm NAME` shows what spm recorded about the service (starts, exit codes, restarts, scheduled runs) instead of its output. Do not use `spm logs -f` or `spm list --watch`; they never return.
 - Control: `spm restart|stop|delete NAME`. An existing name is not replaced unless `--force` is given.
 - Periodic jobs that exit: `spm schedule --name NAME --cron "0 3 * * *" -- COMMAND`.
 - User scope is the default and needs no elevation; `--system` needs root or Administrator.
