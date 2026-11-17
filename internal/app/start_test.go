@@ -26,7 +26,9 @@ type fakeRunner struct {
 	lingerErr       error
 	interactiveErr  error
 	interactiveFunc func(name string, args ...string) error
-	runFunc         func(name string, args ...string) ([]byte, error)
+	// interactiveOutput is written to stdout by every Interactive call.
+	interactiveOutput string
+	runFunc           func(name string, args ...string) ([]byte, error)
 }
 
 func TestMain(m *testing.M) {
@@ -131,8 +133,11 @@ func TestValidSystemdDuration(t *testing.T) {
 	}
 }
 
-func (r *fakeRunner) Interactive(_ io.Reader, _, _ io.Writer, name string, args ...string) error {
+func (r *fakeRunner) Interactive(_ io.Reader, stdout, _ io.Writer, name string, args ...string) error {
 	r.calls = append(r.calls, recordedCall{name: name, args: append([]string(nil), args...)})
+	if r.interactiveOutput != "" {
+		_, _ = io.WriteString(stdout, r.interactiveOutput)
+	}
 	if r.interactiveFunc != nil {
 		return r.interactiveFunc(name, args...)
 	}

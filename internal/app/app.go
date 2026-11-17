@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -1578,7 +1579,14 @@ func (a *application) logs(args []string) error {
 			fallbackArgs = append(fallbackArgs, "--follow")
 		}
 	}
-	if options.lines != "" {
+	// journalctl (seen with systemd 255) prints --lines combined with --grep
+	// newest first, even with --reverse. For one-line-per-entry formats spm
+	// reads the matches in journal order and keeps the last lines itself.
+	var tail *lastLinesWriter
+	if options.lines != "" && options.grep != "" && !options.follow && journalOutputIsLinePerEntry(options.output) {
+		count, _ := strconv.Atoi(options.lines)
+		tail = &lastLinesWriter{limit: count}
+	} else if options.lines != "" {
 		journalArgs = append(journalArgs, "--lines", options.lines)
 		if fallbackArgs != nil {
 			fallbackArgs = append(fallbackArgs, "--lines", options.lines)
@@ -1614,14 +1622,91 @@ func (a *application) logs(args []string) error {
 			fallbackArgs = append(fallbackArgs, "--output", options.output)
 		}
 	}
-	if err := a.runner.Interactive(a.input(), a.stdout, a.stderr, "journalctl", journalArgs...); err == nil || terminatedBySignal(err) {
+	stdout := a.stdout
+	if tail != nil {
+		stdout = tail
+	}
+	err = a.runner.Interactive(a.input(), stdout, a.stderr, "journalctl", journalArgs...)
+	if err != nil && !terminatedBySignal(err) && fallbackArgs != nil {
+		if tail != nil {
+			tail.reset()
+		}
+		err = a.runner.Interactive(a.input(), stdout, a.stderr, "journalctl", fallbackArgs...)
+	}
+	// Print what was kept even when journalctl failed: with no matches it
+	// exits 1 after printing "-- No entries --".
+	if tail != nil {
+		if _, writeErr := tail.writeTo(a.stdout); writeErr != nil {
+			return writeErr
+		}
+	}
+	if err == nil || terminatedBySignal(err) {
 		// A signal usually means the reader went away, for example
 		// `spm logs | head`, so it is neither an error nor a reason to retry.
 		return nil
-	} else if fallbackArgs == nil {
-		return err
 	}
-	return a.runner.Interactive(a.input(), a.stdout, a.stderr, "journalctl", fallbackArgs...)
+	return err
+}
+
+// journalOutputIsLinePerEntry reports whether a journalctl output format
+// prints each entry on one line, so the last N lines are the last N entries.
+func journalOutputIsLinePerEntry(format string) bool {
+	switch format {
+	case "", "short", "short-full", "short-iso", "short-iso-precise", "short-precise", "short-monotonic", "short-delta", "short-unix", "with-unit", "cat", "json", "json-seq":
+		return true
+	}
+	return false
+}
+
+// lastLinesWriter keeps only the last limit lines written to it.
+type lastLinesWriter struct {
+	limit   int
+	lines   []string
+	partial []byte
+}
+
+func (w *lastLinesWriter) Write(p []byte) (int, error) {
+	data := append(w.partial, p...)
+	for {
+		index := bytes.IndexByte(data, '\n')
+		if index < 0 {
+			break
+		}
+		w.keep(string(data[:index+1]))
+		data = data[index+1:]
+	}
+	w.partial = append([]byte(nil), data...)
+	return len(p), nil
+}
+
+func (w *lastLinesWriter) keep(line string) {
+	if w.limit <= 0 {
+		return
+	}
+	w.lines = append(w.lines, line)
+	if len(w.lines) > w.limit {
+		w.lines = w.lines[len(w.lines)-w.limit:]
+	}
+}
+
+func (w *lastLinesWriter) reset() {
+	w.lines, w.partial = nil, nil
+}
+
+func (w *lastLinesWriter) writeTo(out io.Writer) (int64, error) {
+	if len(w.partial) > 0 {
+		w.keep(string(w.partial) + "\n")
+		w.partial = nil
+	}
+	var written int64
+	for _, line := range w.lines {
+		n, err := io.WriteString(out, line)
+		written += int64(n)
+		if err != nil {
+			return written, err
+		}
+	}
+	return written, nil
 }
 
 func terminatedBySignal(err error) bool {

@@ -60,6 +60,69 @@ func TestLogsPassesJournalFilters(t *testing.T) {
 	}
 }
 
+func TestLogsWithGrepKeepsLastMatchesInJournalOrder(t *testing.T) {
+	directory := localTempDir(t)
+	if err := os.WriteFile(filepath.Join(directory, unitName("api")), []byte("unit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{interactiveOutput: "error 1\nerror 2\nerror 3\nerror 4"}
+	var stdout strings.Builder
+	a := &application{runner: runner, stdout: &stdout, stderr: io.Discard, unitDir: directory}
+	if err := a.logs([]string{"api", "--grep", "error", "--lines", "2"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stdout.String(), "error 3\nerror 4\n"; got != want {
+		t.Errorf("logs output = %q, want %q", got, want)
+	}
+	if calls := callsString(runner.calls); strings.Contains(calls, "--lines") {
+		t.Errorf("journalctl was given --lines with --grep: %s", calls)
+	}
+}
+
+func TestLogsPassesLinesToJournalWhenOrderIsSafe(t *testing.T) {
+	directory := localTempDir(t)
+	if err := os.WriteFile(filepath.Join(directory, unitName("api")), []byte("unit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"api", "--lines", "5"},
+		{"api", "--lines", "5", "--grep", "x", "--follow"},
+		{"api", "--lines", "5", "--grep", "x", "--output", "verbose"},
+	} {
+		runner := &fakeRunner{}
+		a := &application{runner: runner, stdout: io.Discard, stderr: io.Discard, unitDir: directory}
+		if err := a.logs(args); err != nil {
+			t.Fatal(err)
+		}
+		if calls := callsString(runner.calls); !strings.Contains(calls, "--lines 5") {
+			t.Errorf("logs %v did not pass --lines to journalctl: %s", args, calls)
+		}
+	}
+}
+
+func TestLastLinesWriterKeepsTail(t *testing.T) {
+	w := &lastLinesWriter{limit: 2}
+	for _, chunk := range []string{"a\nb", "\nc\n", "d"} {
+		if _, err := io.WriteString(w, chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out strings.Builder
+	if _, err := w.writeTo(&out); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != "c\nd\n" {
+		t.Errorf("tail = %q, want %q", got, "c\nd\n")
+	}
+	zero := &lastLinesWriter{limit: 0}
+	_, _ = io.WriteString(zero, "a\nb\n")
+	out.Reset()
+	_, _ = zero.writeTo(&out)
+	if out.Len() != 0 {
+		t.Errorf("limit 0 printed %q", out.String())
+	}
+}
+
 func TestDeleteAllRequiresYes(t *testing.T) {
 	directory := localTempDir(t)
 	if err := os.WriteFile(filepath.Join(directory, unitName("api")), []byte("unit"), 0o644); err != nil {
