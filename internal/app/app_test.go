@@ -152,6 +152,41 @@ func TestLogsGrepKeepsRealJournalErrors(t *testing.T) {
 	}
 }
 
+func TestLogsPrintsJournalErrorOnceWhenFallbackFails(t *testing.T) {
+	directory := localTempDir(t)
+	if err := os.WriteFile(filepath.Join(directory, unitName("api")), []byte("unit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{interactiveStderr: "Bad pattern\n", interactiveErr: exitCodeError(1)}
+	var stderr strings.Builder
+	a := &application{runner: runner, stdout: io.Discard, stderr: &stderr, unitDir: directory}
+	if err := a.logs([]string{"api", "--grep", "("}); err == nil {
+		t.Fatal("logs with a bad pattern returned no error")
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("expected the user-unit fallback to run: %s", callsString(runner.calls))
+	}
+	if got := stderr.String(); got != "Bad pattern\n" {
+		t.Errorf("stderr = %q, want the error once", got)
+	}
+}
+
+func TestLogsKeepsJournalWarningsWhenFirstAttemptSucceeds(t *testing.T) {
+	directory := localTempDir(t)
+	if err := os.WriteFile(filepath.Join(directory, unitName("api")), []byte("unit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{interactiveStderr: "Hint: warning\n"}
+	var stderr strings.Builder
+	a := &application{runner: runner, stdout: io.Discard, stderr: &stderr, unitDir: directory}
+	if err := a.logs([]string{"api"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stderr.String(); got != "Hint: warning\n" {
+		t.Errorf("stderr = %q, want the warning", got)
+	}
+}
+
 func TestLastLinesWriterKeepsTail(t *testing.T) {
 	w := &lastLinesWriter{limit: 2}
 	for _, chunk := range []string{"a\nb", "\nc\n", "d"} {

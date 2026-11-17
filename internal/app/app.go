@@ -1627,7 +1627,16 @@ func (a *application) logs(args []string) error {
 		stdout = tail
 	}
 	watch := &journalOutputWatcher{out: stdout}
-	err = a.runner.Interactive(a.input(), watch, a.stderr, "journalctl", journalArgs...)
+	// Hold back the first attempt's stderr while a fallback could still run,
+	// so an error that both attempts hit, such as a bad --grep pattern, is
+	// printed once. Follow mode streams it, since that attempt may never end.
+	firstStderr := a.stderr
+	var heldStderr *bytes.Buffer
+	if fallbackArgs != nil && !options.follow {
+		heldStderr = &bytes.Buffer{}
+		firstStderr = heldStderr
+	}
+	err = a.runner.Interactive(a.input(), watch, firstStderr, "journalctl", journalArgs...)
 	noMatches := options.grep != "" && journalFoundNoMatches(err, watch)
 	if err != nil && !noMatches && !terminatedBySignal(err) && fallbackArgs != nil {
 		if tail != nil {
@@ -1636,6 +1645,10 @@ func (a *application) logs(args []string) error {
 		watch.reset()
 		err = a.runner.Interactive(a.input(), watch, a.stderr, "journalctl", fallbackArgs...)
 		noMatches = options.grep != "" && journalFoundNoMatches(err, watch)
+	} else if heldStderr != nil {
+		if _, writeErr := heldStderr.WriteTo(a.stderr); writeErr != nil {
+			return writeErr
+		}
 	}
 	// Print what was kept even when journalctl failed, such as its
 	// "-- No entries --" line.
