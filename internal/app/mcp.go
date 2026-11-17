@@ -169,10 +169,11 @@ func spmMCPTools() []mcpTool {
 			"Stop a managed service and permanently remove its definition, saved configuration and companion units such as schedules and health checks. This cannot be undone; the service must be created again with spm_create_service. Confirm the exact name and scope with the user first, and prefer spm_stop_service or spm_disable_service when the user may need it again. "+scopeNote,
 			namedScopeSchema(), destructive),
 		mcpToolDefinition("spm_run_cli", "Run advanced spm command",
-			"Run any supported non-interactive spm CLI operation, including schedule, signal, scale, set, unset, clone, history, rollback, apply, validate, diff, native inspection, security analysis, export, health, and import. Prefer focused tools when one exists. Interactive editors and unbounded watch/follow modes are rejected. "+
-				"Returns the command's text output; run [\"help\", \"<command>\"] first to see a command's options. "+scopeNote,
+			"Run an spm CLI command that has no dedicated tool: schedule, signal, scale, set, unset, clone, history, rollback, apply, validate, diff, native, security, export, health or import. For everyday work use the focused tools instead: spm_create_service, spm_start_service, spm_stop_service, spm_restart_service, spm_get_logs, spm_show_service and spm_delete_service. "+
+				"arguments is the command line after the spm executable, one element per word with no shell quoting: the command first, then its flags and service names; in schedule, everything after \"--\" is the program and its own arguments, passed through unchanged. Put scope in the system parameter, never --system in arguments. Run [\"help\", \"<command>\"] first to see a command's flags. Unknown commands, interactive editors, logs --follow and list --watch are rejected before anything runs. "+
+				"Returns the command's text output, or \"spm command completed successfully.\" when it prints nothing. If the command fails, the result is an error whose text is spm's error message, without any output printed before the failure. "+scopeNote,
 			objectSchema(map[string]any{
-				"arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "description": "Arguments exactly as they appear after the spm executable, excluding --system. Example: [\"schedule\", \"--name\", \"backup\", \"--cron\", \"0 2 * * *\", \"--\", \"backup.exe\"]."},
+				"arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "description": "The spm command line after the executable, one element per word, excluding --system. Example: [\"schedule\", \"--name\", \"backup\", \"--cron\", \"0 2 * * *\", \"--\", \"backup.exe\"]."},
 				"system":    systemProperty(),
 			}, []string{"arguments"}), fullCLI),
 	}
