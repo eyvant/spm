@@ -1,3 +1,5 @@
+<img src="assets/logo.svg" alt="spm logo" width="96" height="96" align="right">
+
 # SPM
 
 **A simple, cross-platform manager for native system services.**
