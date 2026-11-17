@@ -1298,14 +1298,11 @@ func readBootUptime() time.Duration {
 }
 
 func formatUptime(bootUptime time.Duration, activeSinceUSec uint64) string {
-	if bootUptime <= 0 || activeSinceUSec == 0 {
+	uptime, ok := uptimeDuration(bootUptime, activeSinceUSec)
+	if !ok {
 		return "-"
 	}
-	uptime := bootUptime - time.Duration(activeSinceUSec)*time.Microsecond
-	if uptime < 0 {
-		return "-"
-	}
-	return uptime.Truncate(time.Second).String()
+	return uptime.String()
 }
 
 func valueOr(value, fallback string) string {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -695,6 +696,15 @@ func TestUptimeDurationAndCompletionQuery(t *testing.T) {
 	}
 	if _, ok := uptimeDuration(time.Second, uint64(2*time.Second/time.Microsecond)); ok {
 		t.Error("activation after boot uptime unexpectedly produced an uptime")
+	}
+	if _, ok := uptimeDuration(time.Duration(math.MaxInt64), math.MaxUint64); ok {
+		t.Error("activation timestamp beyond time.Duration unexpectedly produced an uptime")
+	}
+	if got := averageCPUPercent(time.Hour, serviceState{active: "active", cpuNSec: "1", activeSince: math.MaxUint64}); got != nil {
+		t.Errorf("CPU percent for overflowing activation = %v, want nil", *got)
+	}
+	if got := formatUptime(time.Hour, math.MaxUint64); got != "-" {
+		t.Errorf("formatUptime for overflowing activation = %q, want -", got)
 	}
 	if got, ok := uptimeDuration(10*time.Second, uint64(3500*time.Millisecond/time.Microsecond)); !ok || got != 6*time.Second {
 		t.Errorf("uptimeDuration = %s, %t", got, ok)

@@ -211,7 +211,7 @@ func (a *application) printConfigDiff(name string, desired persistedStartConfig)
 	desiredData, _ := json.Marshal(desired)
 	_ = json.Unmarshal(currentData, &currentMap)
 	_ = json.Unmarshal(desiredData, &desiredMap)
-	keys := make([]string, 0, len(currentMap)+len(desiredMap))
+	keys := make([]string, 0, len(desiredMap))
 	seen := map[string]bool{}
 	for key := range currentMap {
 		seen[key] = true

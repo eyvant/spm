@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -249,11 +250,8 @@ func averageCPUPercent(bootUptime time.Duration, state serviceState) *float64 {
 	if err != nil {
 		return nil
 	}
-	if bootUptime <= 0 || state.activeSince == 0 {
-		return nil
-	}
-	uptime := bootUptime - time.Duration(state.activeSince)*time.Microsecond
-	if uptime <= 0 {
+	uptime, ok := timeSinceActive(bootUptime, state.activeSince)
+	if !ok || uptime <= 0 {
 		return nil
 	}
 	value := float64(usage) / float64(uptime.Nanoseconds()) * 100
@@ -302,12 +300,22 @@ func (a *application) printListRows(rows []listRow, asJSON bool) error {
 	return w.Flush()
 }
 
-func uptimeDuration(bootUptime time.Duration, activeSinceUSec uint64) (time.Duration, bool) {
-	if bootUptime <= 0 || activeSinceUSec == 0 {
+const maxDurationUSec = uint64(math.MaxInt64 / int64(time.Microsecond))
+
+// timeSinceActive returns how long a unit has been active, given the time
+// since boot and systemd's monotonic ActiveEnterTimestamp in microseconds.
+// A timestamp too large for time.Duration, or later than bootUptime, is
+// rejected before it is converted.
+func timeSinceActive(bootUptime time.Duration, activeSinceUSec uint64) (time.Duration, bool) {
+	if bootUptime <= 0 || activeSinceUSec == 0 || activeSinceUSec > maxDurationUSec || activeSinceUSec > uint64(bootUptime/time.Microsecond) {
 		return 0, false
 	}
-	uptime := bootUptime - time.Duration(activeSinceUSec)*time.Microsecond
-	if uptime < 0 {
+	return bootUptime - time.Duration(activeSinceUSec)*time.Microsecond, true
+}
+
+func uptimeDuration(bootUptime time.Duration, activeSinceUSec uint64) (time.Duration, bool) {
+	uptime, ok := timeSinceActive(bootUptime, activeSinceUSec)
+	if !ok {
 		return 0, false
 	}
 	return uptime.Truncate(time.Second), true
