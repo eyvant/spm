@@ -116,7 +116,7 @@ func spmMCPTools() []mcpTool {
 	return []mcpTool{
 		withOutputSchema(mcpToolDefinition("spm_list_services", "List services",
 			"List every service spm manages in the chosen scope with its live state. Call this first to see what is running, to find an exact service name, or to confirm the effect of a create, start, stop or delete; use spm_show_service for one service's full configuration. "+
-				"Returns structuredContent.services with one entry per unit (a multi-instance service has one entry per instance): name, status, active_state, sub_state, health, pid, cpu_percent, memory_bytes, restarts, enabled, uptime_seconds, and schedule for scheduled jobs. Values the platform cannot report are null. An empty array means no services exist in that scope. "+scopeNote,
+				"Returns structuredContent.services as described by the output schema, one entry per unit (a multi-instance service has one entry per instance). Values the platform cannot report are null, and an empty array means no services exist in that scope. "+scopeNote,
 			scopeSchema(), readOnly), listServicesOutputSchema()),
 		mcpToolDefinition("spm_show_service", "Show service",
 			"Show one managed service in detail as key-value text: status, enabled, PID, memory, restarts, uptime, last result and exit status, schedule, health, its saved configuration (command, working directory, restart policy and other options), and the paths of its unit and config files. "+
@@ -124,7 +124,7 @@ func spmMCPTools() []mcpTool {
 			namedScopeSchema(), readOnly),
 		mcpToolDefinition("spm_get_logs", "Get service logs",
 			"Read recent log lines from one or more managed services. Use it to check that a service started cleanly, to find why it crashed or keeps restarting, or to read its output such as URLs, ports and errors; use spm_doctor instead when spm itself or the service manager seems broken. "+
-				"Returns at most `lines` entries (default 100) as text; with several names, their entries are combined. Set health=true to read health-check output instead of service output. It never follows logs, so call it again to see newer lines. "+scopeNote,
+				"Returns plain text, one log entry per line; on Linux each line carries its journal time and source, while on macOS and Windows lines are the service's own output and since is not supported. since and grep filter the entries first, then lines keeps at most that many of the most recent matches (default 100); with several names, their entries are combined. Set health=true to read health-check output instead of service output. It never follows logs, so call it again to see newer lines. An unknown name returns an error saying the service is not managed by spm. "+scopeNote,
 			objectSchema(map[string]any{
 				"names":  stringArrayProperty("Service names to read. Omit to read logs for all managed services in the scope."),
 				"lines":  map[string]any{"type": "integer", "minimum": 1, "maximum": 1000, "default": 100, "description": "Maximum number of log lines to return."},
@@ -153,10 +153,10 @@ func spmMCPTools() []mcpTool {
 			"Start an existing managed service that is stopped. It does not change whether the service starts at login; use spm_enable_service to start it and turn that on, or spm_create_service for a service that does not exist yet. A service that is already running is left as it is; use spm_restart_service to pick up code or configuration changes. "+scopeNote,
 			namedScopeSchema(), write),
 		mcpToolDefinition("spm_restart_service", "Restart service",
-			"Stop and start a managed service so it picks up new code, configuration or environment. The process gets a new PID and is briefly unavailable; a multi-instance service is restarted one instance at a time so the others keep serving. A stopped service is simply started. "+scopeNote,
+			"Stop and start a managed service so it picks up new code, configuration or environment. The process gets a new PID and is briefly unavailable; a multi-instance service is restarted one instance at a time so the others keep serving. A stopped service is simply started. Use spm_start_service or spm_stop_service when only one half is needed. Returns a one-line confirmation such as \"web restarted\"; call spm_list_services for the new PID or spm_get_logs to confirm it came back up. An unknown name returns an error saying the service is not managed by spm. "+scopeNote,
 			namedScopeSchema(), write),
 		mcpToolDefinition("spm_stop_service", "Stop service",
-			"Stop a running managed service for now. It keeps its definition and still starts again at the next login or boot if it is enabled; use spm_disable_service to keep it stopped, or spm_delete_service to remove it. For a scheduled job, this also stops its timer. "+scopeNote,
+			"Stop a running managed service for now. It keeps its definition and still starts again at the next login or boot if it is enabled; use spm_disable_service to keep it stopped, or spm_delete_service to remove it. For a scheduled job, this also stops its timer. Stopping a service that is already stopped succeeds and changes nothing. Returns a one-line confirmation such as \"web stopped\"; an unknown name returns an error saying the service is not managed by spm. "+scopeNote,
 			namedScopeSchema(), write),
 		mcpToolDefinition("spm_enable_service", "Enable service",
 			"Turn on start at login or boot for an existing managed service, and start it now. Use it to undo spm_disable_service; use spm_start_service to run a service now without changing its startup setting. For a scheduled job, this re-enables its timer. "+scopeNote,
@@ -177,9 +177,9 @@ func spmMCPTools() []mcpTool {
 	}
 }
 
-// scopeNote ends every tool description so agents know the default scope and
-// what the system flag requires.
-const scopeNote = "Acts on the current user's services unless system is true; machine-wide services need root on Linux and macOS or an Administrator shell on Windows, so only use system when the user asks for it."
+// scopeNote ends every tool description so agents know the default scope;
+// the privileges system needs are described once, on the system parameter.
+const scopeNote = "Acts on the current user's services; set system only when the user asks for machine-wide services."
 
 func mcpToolDefinition(name, title, description string, schema map[string]any, annotations map[string]any) mcpTool {
 	return mcpTool{Name: name, Title: title, Description: description, InputSchema: schema, Annotations: annotations}
@@ -244,7 +244,7 @@ func nameProperty() map[string]any {
 }
 
 func systemProperty() map[string]any {
-	return map[string]any{"type": "boolean", "default": false, "description": "Manage machine-wide services instead of the current user's. Requires root or Administrator; leave false unless the user asks for system scope."}
+	return map[string]any{"type": "boolean", "default": false, "description": "Manage machine-wide services instead of the current user's. Requires root on Linux and macOS or an Administrator shell on Windows; leave false unless the user asks for system scope."}
 }
 
 func stringArrayProperty(description string) map[string]any {
