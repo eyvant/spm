@@ -8,6 +8,11 @@ name: Publish to MCP Registry
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish; defaults to the latest release
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -24,11 +29,12 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Set version from the latest release
+      - name: Set version from the release tag
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
-          tag="${{ github.event.release.tag_name }}"
+          tag="$TAG"
           if [[ -z "$tag" ]]; then
             tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
           fi

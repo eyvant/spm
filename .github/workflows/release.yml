@@ -269,3 +269,23 @@ jobs:
               --generate-notes \
               --title "$GITHUB_REF_NAME"
           fi
+
+  mcp-registry:
+    name: Publish to MCP Registry
+    needs: release
+    # Pre-release tags such as v1.0.0-rc.1 stay out of the registry.
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      # A release created with GITHUB_TOKEN does not trigger the
+      # release-published workflow, so start it explicitly.
+      - name: Start MCP Registry workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run mcp-registry.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF_NAME" \
+            -f tag="$GITHUB_REF_NAME"
