@@ -61,13 +61,17 @@ func selectLogFiles(b fileLogBackend, options logsOptions, platform string) ([]l
 // line starts with the service name.
 func printLogFiles(w io.Writer, files []logFile, options logsOptions) error {
 	count, _ := strconv.Atoi(options.lines)
+	grep, err := common.CompileLogGrep(options.grep)
+	if err != nil {
+		return err
+	}
 	writers := make([]io.Writer, len(files))
 	for index, file := range files {
 		writers[index] = w
 		if len(files) > 1 {
 			writers[index] = &linePrefixWriter{out: w, prefix: file.label + " | "}
 		}
-		if err := common.PrintRotatedLogTail(writers[index], file.path, count, options.grep); err != nil {
+		if err := common.PrintRotatedLogTail(writers[index], file.path, count, grep); err != nil {
 			return err
 		}
 	}
@@ -84,7 +88,7 @@ func printLogFiles(w io.Writer, files []logFile, options logsOptions) error {
 	for {
 		time.Sleep(500 * time.Millisecond)
 		for index, file := range files {
-			info, offset, err := common.ReadRotatingLogUpdates(writers[index], file.path, identities[index], offsets[index], options.grep)
+			info, offset, err := common.ReadRotatingLogUpdates(writers[index], file.path, identities[index], offsets[index], grep)
 			if err == nil {
 				identities[index], offsets[index] = info, offset
 			}

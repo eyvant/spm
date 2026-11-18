@@ -129,7 +129,7 @@ func spmMCPTools() []mcpTool {
 				"names":  stringArrayProperty("Service names to read. Omit to read logs for all managed services in the scope."),
 				"lines":  map[string]any{"type": "integer", "minimum": 1, "maximum": 1000, "default": 100, "description": "Maximum number of log lines to return."},
 				"since":  map[string]any{"type": "string", "description": "Only return entries newer than this: a relative time such as 10m or 1h, or a date such as 2026-01-01."},
-				"grep":   map[string]any{"type": "string", "description": "Only return lines matching this pattern, for example error."},
+				"grep":   map[string]any{"type": "string", "description": "Only return lines matching this regular expression, for example error|warn. It ignores case unless the pattern contains uppercase letters, on every platform."},
 				"source": map[string]any{"type": "string", "enum": []string{"service", "spm", "scheduler"}, "default": "service", "description": "service: the service's own output. spm: what spm recorded about the service (starts, exits, scheduled runs). scheduler: the spm scheduler's log (macOS and Windows; omit names)."},
 				"health": map[string]any{"type": "boolean", "default": false, "description": "Read health-check logs instead of the service's own output."},
 				"system": systemProperty(),

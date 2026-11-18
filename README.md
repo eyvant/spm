@@ -345,9 +345,14 @@ spm logs api -n 20           # last 20 entries
 spm logs api -f              # follow
 spm logs api worker -f       # merge several services
 spm logs                     # merge all spm services
-spm logs api --since 1h --grep ERROR
+spm logs api --since 1h --grep 'error|warn'
 spm logs api --boot --output json
 ```
+
+`--grep` takes a regular expression and ignores case unless the pattern has
+an uppercase letter, so `--grep error` also finds `ERROR`, while
+`--grep ERROR` finds only `ERROR`. It works the same on Linux, Windows and
+macOS.
 
 `spm logs` shows what the services wrote. `--spm` shows what spm recorded about
 them instead: when each run started, how it ended and with which exit code,

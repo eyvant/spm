@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 )
 
@@ -92,7 +93,7 @@ func TestPrintRotatedLogTailReadsBackupsInOrder(t *testing.T) {
 		}
 	}
 	var output bytes.Buffer
-	if err := PrintRotatedLogTail(&output, path, 2, ""); err != nil {
+	if err := PrintRotatedLogTail(&output, path, 2, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := output.String(); got != "two\nthree\n" {
@@ -120,7 +121,7 @@ func TestReadRotatingLogUpdatesFollowsReplacementFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	current, offset, err := ReadRotatingLogUpdates(&output, path, previous, previous.Size(), "")
+	current, offset, err := ReadRotatingLogUpdates(&output, path, previous, previous.Size(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +151,7 @@ func TestRotatingLogValidationAndEdgePaths(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	previous, offset, err := ReadRotatingLogUpdates(&output, path, nil, 7, "")
+	previous, offset, err := ReadRotatingLogUpdates(&output, path, nil, 7, nil)
 	if err != nil || previous != nil || offset != 7 {
 		t.Fatalf("missing update = %#v, %d, %v", previous, offset, err)
 	}
@@ -162,19 +163,73 @@ func TestRotatingLogValidationAndEdgePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	output.Reset()
-	current, next, err := ReadRotatingLogUpdates(&output, path, info, info.Size()+10, "two")
+	current, next, err := ReadRotatingLogUpdates(&output, path, info, info.Size()+10, regexp.MustCompile("two"))
 	if err != nil || current == nil || next != info.Size() || output.String() != "two\n" {
 		t.Fatalf("truncated update = %#v, %d, %q, %v", current, next, output.String(), err)
 	}
 	directory := localTempDir(t)
-	if err := PrintRotatedLogTail(&output, directory, 1, ""); err == nil {
+	if err := PrintRotatedLogTail(&output, directory, 1, nil); err == nil {
 		t.Fatal("tailing a directory unexpectedly succeeded")
 	}
-	if _, err := printLogFromOffset(&output, directory, 0, ""); err == nil {
+	if _, err := printLogFromOffset(&output, directory, 0, nil); err == nil {
 		t.Fatal("reading a directory unexpectedly succeeded")
 	}
 	log := &RotatingLog{}
 	if err := log.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCompileLogGrepMatchesLikeJournalctl(t *testing.T) {
+	lines := []string{"[ok] signals=21 errors=0", "WARN disk low", "Error: timeout", "plain line"}
+	for _, test := range []struct {
+		pattern string
+		want    []string
+	}{
+		{"", lines},
+		{"error|warn", []string{"[ok] signals=21 errors=0", "WARN disk low", "Error: timeout"}},
+		{"ERRORS", nil},
+		{"Error", []string{"Error: timeout"}},
+		{`errors=\d`, []string{"[ok] signals=21 errors=0"}},
+	} {
+		grep, err := CompileLogGrep(test.pattern)
+		if err != nil {
+			t.Fatalf("CompileLogGrep(%q): %v", test.pattern, err)
+		}
+		var got []string
+		for _, line := range lines {
+			if grep == nil || grep.MatchString(line) {
+				got = append(got, line)
+			}
+		}
+		if len(got) != len(test.want) {
+			t.Fatalf("pattern %q matched %q, want %q", test.pattern, got, test.want)
+		}
+		for index := range got {
+			if got[index] != test.want[index] {
+				t.Fatalf("pattern %q matched %q, want %q", test.pattern, got, test.want)
+			}
+		}
+	}
+	if _, err := CompileLogGrep("error("); err == nil {
+		t.Fatal("invalid pattern compiled without an error")
+	}
+}
+
+func TestPrintRotatedLogTailFiltersWithRegex(t *testing.T) {
+	path := filepath.Join(localTempDir(t), "service.log")
+	if err := os.WriteFile(path, []byte("start\nERROR one\nok\nwarn two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	grep, err := CompileLogGrep("error|warn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := PrintRotatedLogTail(&output, path, 10, grep); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "ERROR one\nwarn two\n"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
 	}
 }

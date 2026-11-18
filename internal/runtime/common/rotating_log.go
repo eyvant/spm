@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -133,7 +134,26 @@ func rotateLogFiles(path string, backups int) error {
 	return nil
 }
 
-func PrintRotatedLogTail(w io.Writer, path string, count int, grep string) error {
+// CompileLogGrep compiles a --grep pattern the way journalctl reads one, so
+// spm logs filters alike on every platform: a regular expression that
+// ignores case when the pattern has no uppercase letters. An empty pattern
+// returns nil, which matches every line.
+func CompileLogGrep(pattern string) (*regexp.Regexp, error) {
+	if pattern == "" {
+		return nil, nil
+	}
+	expression := pattern
+	if strings.ToLower(pattern) == pattern {
+		expression = "(?i)" + pattern
+	}
+	compiled, err := regexp.Compile(expression)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --grep pattern %q: %w", pattern, err)
+	}
+	return compiled, nil
+}
+
+func PrintRotatedLogTail(w io.Writer, path string, count int, grep *regexp.Regexp) error {
 	var data []byte
 	for index := DefaultLogBackups; index >= 0; index-- {
 		candidate := path
@@ -151,7 +171,7 @@ func PrintRotatedLogTail(w io.Writer, path string, count int, grep string) error
 	}
 	var lines []string
 	for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
-		if line != "" && (grep == "" || strings.Contains(line, grep)) {
+		if line != "" && (grep == nil || grep.MatchString(line)) {
 			lines = append(lines, line)
 		}
 	}
@@ -164,7 +184,7 @@ func PrintRotatedLogTail(w io.Writer, path string, count int, grep string) error
 	return nil
 }
 
-func ReadRotatingLogUpdates(w io.Writer, path string, previous os.FileInfo, offset int64, grep string) (os.FileInfo, int64, error) {
+func ReadRotatingLogUpdates(w io.Writer, path string, previous os.FileInfo, offset int64, grep *regexp.Regexp) (os.FileInfo, int64, error) {
 	current, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		return previous, offset, nil
@@ -201,7 +221,7 @@ func sameLogFile(left, right os.FileInfo) bool {
 	return os.SameFile(left, right) || left.Size() == right.Size() && left.ModTime().Equal(right.ModTime())
 }
 
-func printLogFromOffset(w io.Writer, path string, offset int64, grep string) (int64, error) {
+func printLogFromOffset(w io.Writer, path string, offset int64, grep *regexp.Regexp) (int64, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return offset, err
@@ -213,7 +233,7 @@ func printLogFromOffset(w io.Writer, path string, offset int64, grep string) (in
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if grep == "" || strings.Contains(line, grep) {
+		if grep == nil || grep.MatchString(line) {
 			fmt.Fprintln(w, line)
 		}
 	}

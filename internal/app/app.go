@@ -603,7 +603,8 @@ Options:
   -n, --lines N               Show the last N entries
   --since TIME                Show entries since TIME, for example 1h or today
   --until TIME                Show entries until TIME
-  --grep PATTERN              Filter messages by pattern
+  --grep PATTERN              Keep entries matching a regular expression,
+                              case-insensitive unless it has uppercase
   --boot                      Only show entries from the current boot
   --health                    Show health check and recovery logs
   --spm                       Show spm's records about the services
