@@ -761,7 +761,48 @@ Saved normalized configurations use mode `0600` and live in:
 | `pm2 scale api 8` | `spm scale api 8` |
 | `pm2 startup` | `spm startup` |
 | `pm2 save` | Not needed; spm enables services when they are created. |
-| PM2 ecosystem file | `spm export all > spm.toml`, then `spm apply spm.toml` |
+| PM2 ecosystem file | `spm import pm2 ecosystem.config.js -o spm.toml`, then `spm apply spm.toml` |
+
+## Migrating from PM2 or Supervisor
+
+`spm import pm2` and `spm import supervisor` convert another process manager's
+configuration into [declarative](#declarative-configuration) `spm.toml`
+entries. They work on Linux, macOS, and Windows and install nothing, so you can
+review the result before switching over:
+
+```bash
+spm import pm2 ecosystem.config.js --env production -o spm.toml   # ecosystem file
+spm import pm2 -o spm.toml                    # running processes (pm2 jlist, else ~/.pm2/dump.pm2)
+spm import supervisor /etc/supervisor/supervisord.conf -o spm.toml
+spm import supervisor -o spm.toml            # find supervisord.conf the way supervisord does
+spm validate spm.toml
+pm2 delete all        # or: supervisorctl stop all
+spm apply spm.toml
+```
+
+- **pm2** reads `ecosystem.config.js`, `.cjs`, and `.mjs` files through `node`,
+  as well as ecosystem JSON, `pm2 jlist` output, and `dump.pm2`. It maps
+  `script`, `args`, `interpreter`, `interpreter_args`/`node_args`, `cwd`, `env`
+  (plus `env_<NAME>` with `--env NAME`), `instances`, `autorestart`,
+  `restart_delay`, `max_restarts`, `max_memory_restart`, and `cron_restart`.
+  When it reads live state, it drops the shell environment that pm2 inherited,
+  and it imports stopped apps as disabled.
+- **supervisor** reads every `[program:x]` section and follows `[include]`.
+  Without a path it searches where supervisord does, in the same order:
+  `../etc/supervisord.conf` and `../supervisord.conf` next to the
+  `supervisord` executable, `./supervisord.conf`, `./etc/supervisord.conf`,
+  `/etc/supervisord.conf`, then `/etc/supervisor/supervisord.conf`. It prints
+  the file it chose.
+  It maps `command`, `directory`, `environment`, `autostart`, `autorestart`,
+  `startretries`, `user`, `numprocs`, `stopsignal`, and `stopwaitsecs`, and
+  expands `%(program_name)s`, `%(here)s`, and `%(ENV_X)s`.
+
+Settings with no spm equivalent, such as watch mode, cluster load-balancing,
+and log file paths, are listed in `# NOTE:` comments above each service. So are
+settings the current platform does not support, which are dropped: on macOS and
+Windows that includes instances, `cron_restart`, memory limits, and start
+limits. `user` and `group` are kept only with `spm --system import ...`.
+Without `-o`, the declarations are printed to stdout.
 
 ## Agent and MCP integration
 

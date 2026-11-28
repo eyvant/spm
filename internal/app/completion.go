@@ -125,6 +125,12 @@ func (a *application) completionCandidates(args []string) []string {
 		}
 	case "schedule":
 		return filterCompletionCandidates(scheduleCompletionOptions, current)
+	case "import":
+		if len(commandArgs) == 0 {
+			if sources := filterCompletionCandidates([]string{"pm2", "supervisor"}, current); len(sources) > 0 {
+				return sources
+			}
+		}
 	case "run", "status", "show", "describe", "cat", "edit", "security", "health", "history":
 		return filterCompletionCandidates(a.completionServiceNames(false), current)
 	case "logs":
@@ -197,7 +203,7 @@ func completionOptions(command string) []string {
 	case "apply":
 		return []string{"--dry-run", "--help", "-h"}
 	case "import":
-		return []string{"--name", "--help", "-h"}
+		return []string{"--name", "--output", "-o", "--env", "--force", "--help", "-h"}
 	default:
 		return []string{"--help", "-h"}
 	}

@@ -211,6 +211,11 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	if hasCommandHelp(args[1:]) {
 		return printCommandHelp(stdout, args[0])
 	}
+	if isForeignImport(args) {
+		// Converting pm2 or supervisor configuration only writes spm.toml,
+		// so it works the same on every platform backend.
+		return importForeign(args[1:], stdout, stderr, system)
+	}
 	if runtime.GOOS == "windows" {
 		return runWindows(args, stdout, stderr, system)
 	}
@@ -390,6 +395,8 @@ Common commands:
   spm export <name|all>
   spm health <name>
   spm import <unit-file> [--name NAME]
+  spm import pm2 [ecosystem-file] [-o spm.toml]
+  spm import supervisor [supervisord.conf] [-o spm.toml]
   spm mcp
   spm completion bash|zsh|fish
 
@@ -658,7 +665,31 @@ Options may appear before or after the service name.
 	case "health":
 		fmt.Fprintln(w, "Usage:\n  spm health <name>")
 	case "import":
-		fmt.Fprintln(w, "Usage:\n  spm import <unit-file> [--name NAME]")
+		fmt.Fprintln(w, `Usage:
+  spm import <unit-file> [--name NAME]
+  spm import pm2 [ecosystem-file] [--env NAME] [-o spm.toml] [--force]
+  spm import supervisor [supervisord.conf] [-o spm.toml] [--force]
+
+The first form installs an existing systemd unit (Linux only).
+
+The pm2 and supervisor forms convert another process manager's configuration
+into spm.toml declarations on any platform. They install nothing: review the
+result, stop the original processes, then run spm apply.
+
+pm2 sources: ecosystem.config.js/.cjs/.mjs (loaded with node), ecosystem
+JSON, or a pm2 jlist / dump.pm2 file. Without a file, the running processes
+from pm2 jlist are used, falling back to ~/.pm2/dump.pm2. --env NAME merges
+the app's env_NAME block.
+
+supervisor sources: supervisord.conf or a program .conf; [include] files are
+followed. Every [program:x] section becomes a service. Without a file, the
+locations supervisord itself searches are tried in its order:
+../etc/supervisord.conf and ../supervisord.conf next to the supervisord
+executable, ./supervisord.conf, ./etc/supervisord.conf, /etc/supervisord.conf,
+and /etc/supervisor/supervisord.conf.
+
+Settings spm cannot carry over are written as # NOTE comments. Without -o the
+declarations are printed to stdout.`)
 	case "mcp":
 		fmt.Fprintln(w, "Usage:\n  spm mcp\n\nRun the local stdio MCP server for Codex and other MCP clients.")
 	case "version":
