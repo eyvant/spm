@@ -128,4 +128,4 @@ jobs:
           name: coverage-macos-${{ matrix.os }}-go-${{ matrix.go }}
           path: "*coverage.out"
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1

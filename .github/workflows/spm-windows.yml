@@ -116,4 +116,4 @@ jobs:
           name: coverage-windows-${{ matrix.runner }}
           path: "*coverage.out"
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1

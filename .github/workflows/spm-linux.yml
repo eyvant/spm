@@ -100,7 +100,7 @@ jobs:
           name: coverage-linux-${{ matrix.os }}
           path: "*coverage.out"
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   compatibility:
     name: Unit compatibility (${{ matrix.distro }})
